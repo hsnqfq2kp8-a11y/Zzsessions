@@ -120,9 +120,9 @@ def calendar_keyboard(
 
     keyboard: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("‹ السابق", callback_data=f"calendar:{mode}:{prev_year}:{prev_month}"),
+            InlineKeyboardButton("← السابق", callback_data=f"calendar:{mode}:{prev_year}:{prev_month}"),
             InlineKeyboardButton(month_name, callback_data="noop"),
-            InlineKeyboardButton("التالي ›", callback_data=f"calendar:{mode}:{next_year}:{next_month}"),
+            InlineKeyboardButton("التالي →", callback_data=f"calendar:{mode}:{next_year}:{next_month}"),
         ],
         [InlineKeyboardButton(day, callback_data="noop") for day in AR_WEEKDAYS],
     ]
