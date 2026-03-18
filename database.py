@@ -151,6 +151,31 @@ class Database:
 
             return "exists"
 
+    def get_first_available_month(self, now_date: str, now_time: str) -> tuple[int, int] | None:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT s.slot_date
+                FROM slots s
+                WHERE s.is_active=1
+                  AND (s.slot_date > ? OR (s.slot_date = ? AND s.end_time > ?))
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM bookings b
+                      WHERE b.slot_id=s.id AND b.status='confirmed'
+                  )
+                ORDER BY s.slot_date, s.start_time
+                LIMIT 1
+                """,
+                (now_date, now_date, now_time),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            slot_date = date.fromisoformat(row["slot_date"])
+            return slot_date.year, slot_date.month
+
     def get_available_dates_for_month(self, year: int, month: int, now_date: str, now_time: str) -> set[int]:
         with self._lock:
             rows = self.conn.execute(
