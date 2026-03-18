@@ -49,6 +49,16 @@ class Database:
             self.conn.execute("PRAGMA foreign_keys=ON;")
         self.init_db()
 
+    @staticmethod
+    def _normalize_date_str(value: str) -> str:
+        raw = (value or "").strip()
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(raw, fmt).date().isoformat()
+            except ValueError:
+                continue
+        raise ValueError(f"Unsupported date format: {value}")
+
     def init_db(self) -> None:
         with self._lock, self.conn:
             self.conn.executescript(
@@ -103,6 +113,55 @@ class Database:
                     "INSERT INTO settings(key, value) VALUES('booking_open', '1')"
                 )
 
+            self._migrate_slot_dates()
+
+    def _migrate_slot_dates(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, slot_date, start_time, end_time
+            FROM slots
+            ORDER BY id
+            """
+        ).fetchall()
+
+        for row in rows:
+            old_date = row["slot_date"]
+            try:
+                new_date = self._normalize_date_str(old_date)
+            except ValueError:
+                continue
+
+            if new_date == old_date:
+                continue
+
+            try:
+                self.conn.execute(
+                    "UPDATE slots SET slot_date=? WHERE id=?",
+                    (new_date, row["id"]),
+                )
+            except sqlite3.IntegrityError:
+                canonical = self.conn.execute(
+                    """
+                    SELECT id
+                    FROM slots
+                    WHERE slot_date=? AND start_time=? AND end_time=? AND id<>?
+                    ORDER BY id
+                    LIMIT 1
+                    """,
+                    (new_date, row["start_time"], row["end_time"], row["id"]),
+                ).fetchone()
+
+                if canonical:
+                    canonical_id = canonical["id"]
+                    self.conn.execute(
+                        "UPDATE bookings SET slot_id=? WHERE slot_id=?",
+                        (canonical_id, row["id"]),
+                    )
+                    self.conn.execute(
+                        "DELETE FROM slots WHERE id=?",
+                        (row["id"],),
+                    )
+
     def set_booking_open(self, is_open: bool) -> None:
         with self._lock, self.conn:
             self.conn.execute(
@@ -118,6 +177,8 @@ class Database:
             return (row["value"] if row else "1") == "1"
 
     def upsert_slot(self, slot_date: str, start_time: str, end_time: str, created_by: int) -> str:
+        normalized_date = self._normalize_date_str(slot_date)
+
         with self._lock, self.conn:
             existing = self.conn.execute(
                 """
@@ -125,7 +186,7 @@ class Database:
                 FROM slots
                 WHERE slot_date=? AND start_time=? AND end_time=?
                 """,
-                (slot_date, start_time, end_time),
+                (normalized_date, start_time, end_time),
             ).fetchone()
 
             if existing is None:
@@ -134,7 +195,7 @@ class Database:
                     INSERT INTO slots(slot_date, start_time, end_time, is_active, created_by)
                     VALUES (?, ?, ?, 1, ?)
                     """,
-                    (slot_date, start_time, end_time, created_by),
+                    (normalized_date, start_time, end_time, created_by),
                 )
                 return "created"
 
@@ -211,6 +272,8 @@ class Database:
             return {int(r["day"]) for r in rows}
 
     def get_available_slots(self, slot_date: str, now_date: str | None = None, now_time: str | None = None) -> list[Slot]:
+        normalized_date = self._normalize_date_str(slot_date)
+
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -226,11 +289,13 @@ class Database:
                   AND (? IS NULL OR s.slot_date > ? OR (s.slot_date = ? AND s.end_time > ?))
                 ORDER BY s.start_time
                 """,
-                (slot_date, now_date, now_date, now_date, now_time),
+                (normalized_date, now_date, now_date, now_date, now_time),
             ).fetchall()
             return [Slot(**dict(r)) for r in rows]
 
     def get_all_slots_for_date(self, slot_date: str) -> list[Slot]:
+        normalized_date = self._normalize_date_str(slot_date)
+
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -239,7 +304,7 @@ class Database:
                 WHERE slot_date=? AND is_active=1
                 ORDER BY start_time
                 """,
-                (slot_date,),
+                (normalized_date,),
             ).fetchall()
             return [Slot(**dict(r)) for r in rows]
 
@@ -279,6 +344,8 @@ class Database:
             return True, "removed"
 
     def remove_day(self, slot_date: str) -> tuple[bool, str, int]:
+        normalized_date = self._normalize_date_str(slot_date)
+
         with self._lock, self.conn:
             active_booking = self.conn.execute(
                 """
@@ -288,7 +355,7 @@ class Database:
                 WHERE s.slot_date=? AND b.status='confirmed'
                 LIMIT 1
                 """,
-                (slot_date,),
+                (normalized_date,),
             ).fetchone()
 
             if active_booking:
@@ -300,7 +367,7 @@ class Database:
                 SET is_active=0
                 WHERE slot_date=? AND is_active=1
                 """,
-                (slot_date,),
+                (normalized_date,),
             )
             return True, "removed", cur.rowcount
 
