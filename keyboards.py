@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date, datetime
+from datetime import date
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 
-AR_WEEKDAYS = ["أحد", "اثن", "ثلا", "أرب", "خمي", "جمع", "سبت"]
+AR_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 AR_MONTHS = [
     "يناير",
     "فبراير",
@@ -26,23 +26,25 @@ AR_MONTHS = [
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("عرض الأوقات المتاحة")],
-            [KeyboardButton("مواعيدي"), KeyboardButton("إلغاء حجز")],
+            [KeyboardButton("عرض المواعيد المتاحة")],
+            [KeyboardButton("مواعيدي")],
+            [KeyboardButton("إلغاء حجز")],
+            [KeyboardButton("تواصل مع المنسقات")],
         ],
         resize_keyboard=True,
     )
 
 
 def panel_keyboard(is_open: bool) -> InlineKeyboardMarkup:
-    status_text = "إغلاق الحجز" if is_open else "فتح الحجز"
+    status_text = "إغلاق تلقي الحجوزات" if is_open else "فتح الحجز"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("إضافة يوم/أوقات", callback_data="panel:add")],
+            [InlineKeyboardButton("إضافة يوم/ساعة", callback_data="panel:add")],
+            [InlineKeyboardButton("عرض الحجوزات", callback_data="panel:bookings")],
             [InlineKeyboardButton("حذف وقت", callback_data="panel:remove_slot")],
             [InlineKeyboardButton("حذف يوم كامل", callback_data="panel:remove_day")],
-            [InlineKeyboardButton("عرض الحجوزات", callback_data="panel:bookings")],
+            [InlineKeyboardButton("حذف حجز تم تأكيده", callback_data="panel:remove_booking")],
             [InlineKeyboardButton(status_text, callback_data="panel:toggle")],
-            [InlineKeyboardButton("تحديث اللوحة", callback_data="panel:refresh")],
         ]
     )
 
@@ -75,6 +77,15 @@ def bookings_list_keyboard(booking_ids: list[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def manager_bookings_remove_keyboard(booking_ids: list[int]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"حذف الحجز #{booking_id}", callback_data=f"manager_cancel_booking:{booking_id}")]
+        for booking_id in booking_ids
+    ]
+    rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 def slots_keyboard(slot_buttons: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(label, callback_data=f"slot:{slot_id}")]
@@ -89,7 +100,7 @@ def manager_slots_remove_keyboard(slot_buttons: list[tuple[int, str]]) -> Inline
         [InlineKeyboardButton(f"حذف {label}", callback_data=f"remove_slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
-    rows.append([InlineKeyboardButton("رجوع للوحة", callback_data="panel:refresh")])
+    rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -104,10 +115,15 @@ def calendar_keyboard(
     cal = calendar.Calendar(firstweekday=6)
     month_name = f"{AR_MONTHS[month - 1]} {year}"
 
+    prev_year, prev_month = _prev_month(year, month)
+    next_year, next_month = _next_month(year, month)
+
     keyboard: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("‹ السابق", callback_data=f"calendar:{mode}:{_prev_month(year, month)[0]}:{_prev_month(year, month)[1]}"),
-         InlineKeyboardButton(month_name, callback_data="noop"),
-         InlineKeyboardButton("التالي ›", callback_data=f"calendar:{mode}:{_next_month(year, month)[0]}:{_next_month(year, month)[1]}")],
+        [
+            InlineKeyboardButton("‹ السابق", callback_data=f"calendar:{mode}:{prev_year}:{prev_month}"),
+            InlineKeyboardButton(month_name, callback_data="noop"),
+            InlineKeyboardButton("التالي ›", callback_data=f"calendar:{mode}:{next_year}:{next_month}"),
+        ],
         [InlineKeyboardButton(day, callback_data="noop") for day in AR_WEEKDAYS],
     ]
 
@@ -118,13 +134,14 @@ def calendar_keyboard(
             if day == 0:
                 row.append(InlineKeyboardButton(" ", callback_data="noop"))
                 continue
+
             current_date = date(year, month, day)
             if current_date < now_date:
                 row.append(InlineKeyboardButton("·", callback_data="noop"))
                 continue
 
             label = str(day)
-            if day in marked_days:
+            if day in marked_days and mode != "client":
                 label = f"• {day}"
 
             if mode == "client" and day in available_days:
