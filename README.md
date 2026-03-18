@@ -1,7 +1,8 @@
 # ============================================
 # اعداداتك - غير هنا فقط:
-TOKEN = "ضع_توكن_البوت_هنا"  # من @BotFather
-ADMIN = 123456789              # من @userinfobot
+TOKEN = "8657374765:AAEAtbUwhDdBG7sXdX04-lMpNIc189YKCaI"
+ADMIN = 675246320
+
 # ============================================
 
 import os, sqlite3, asyncio, logging
