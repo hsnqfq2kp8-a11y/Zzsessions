@@ -82,25 +82,23 @@ def format_date_slash(slot_date: str) -> str:
     return f"{dt.year}/{dt.month}/{dt.day}"
 
 
-def format_hour_12(dt: datetime) -> str:
-    hour = dt.hour % 12 or 12
-    return f"{hour}:{dt.minute:02d}"
-
-
-def format_period(dt: datetime) -> str:
-    return "صباحًا" if dt.hour < 12 else "مساءً"
-
-
-def clean_secondary_label(label: str | None) -> str:
-    cleaned = (label or "المغرب").replace("بتوقيت", "").replace("توقيت", "").strip()
-    return cleaned or "المغرب"
+def format_hour(dt: datetime) -> str:
+    return f"{dt.hour}:{dt.minute:02d}"
 
 
 def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
-    start_dt = datetime.combine(date.fromisoformat(slot_date), time.fromisoformat(start_time), tzinfo=SETTINGS.timezone)
-    end_dt = datetime.combine(date.fromisoformat(slot_date), time.fromisoformat(end_time), tzinfo=SETTINGS.timezone)
+    start_dt = datetime.combine(
+        date.fromisoformat(slot_date),
+        time.fromisoformat(start_time),
+        tzinfo=SETTINGS.timezone,
+    )
+    end_dt = datetime.combine(
+        date.fromisoformat(slot_date),
+        time.fromisoformat(end_time),
+        tzinfo=SETTINGS.timezone,
+    )
 
-    mecca_range = f"{format_hour_12(start_dt)} {format_period(start_dt)}-{format_hour_12(end_dt)} {format_period(end_dt)}"
+    mecca_range = f"{format_hour(start_dt)}-{format_hour(end_dt)}"
 
     lines = [
         f"اليوم : {format_date_slash(slot_date)}",
@@ -110,8 +108,8 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
     if SETTINGS.secondary_timezone:
         alt_start = start_dt.astimezone(SETTINGS.secondary_timezone)
         alt_end = end_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_range = f"{format_hour_12(alt_start)} {format_period(alt_start)}-{format_hour_12(alt_end)} {format_period(alt_end)}"
-        lines.append(f"و {alt_range} بتوقيت {clean_secondary_label(SETTINGS.secondary_timezone_label)}")
+        alt_range = f"{format_hour(alt_start)}-{format_hour(alt_end)}"
+        lines.append(f"و {alt_range} بتوقيت المغرب العربي")
 
     return "\n".join(lines)
 
