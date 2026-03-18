@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, CallbackQuery, Update
 from telegram.constants import ChatType, ParseMode
@@ -82,23 +82,54 @@ def format_date_slash(slot_date: str) -> str:
     return f"{dt.year}/{dt.month}/{dt.day}"
 
 
-def format_hour(dt: datetime) -> str:
-    return f"{dt.hour}:{dt.minute:02d}"
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hour_str, minute_str = value.strip().split(":")
+    return int(hour_str), int(minute_str)
+
+
+def _map_session_hour(hour_value: int) -> int:
+    if 5 <= hour_value <= 11:
+        return hour_value + 12
+    if hour_value == 12:
+        return 0
+    return hour_value
+
+
+def build_actual_range(slot_date: str, start_time: str, end_time: str) -> tuple[datetime, datetime]:
+    base_date = date.fromisoformat(slot_date)
+
+    start_hour_raw, start_minute = _parse_hhmm(start_time)
+    end_hour_raw, end_minute = _parse_hhmm(end_time)
+
+    explicit_24h = start_hour_raw >= 13 or end_hour_raw >= 13
+
+    if explicit_24h:
+        start_hour_actual = start_hour_raw
+        end_hour_actual = end_hour_raw
+    else:
+        start_hour_actual = _map_session_hour(start_hour_raw)
+        end_hour_actual = _map_session_hour(end_hour_raw)
+
+    start_dt = datetime.combine(base_date, time(start_hour_actual, start_minute), tzinfo=SETTINGS.timezone)
+    end_dt = datetime.combine(base_date, time(end_hour_actual, end_minute), tzinfo=SETTINGS.timezone)
+
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+
+    return start_dt, end_dt
+
+
+def format_display_hour(dt: datetime) -> str:
+    hour_value = dt.hour % 12
+    if hour_value == 0:
+        hour_value = 12
+    return f"{hour_value}:{dt.minute:02d}"
 
 
 def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
-    start_dt = datetime.combine(
-        date.fromisoformat(slot_date),
-        time.fromisoformat(start_time),
-        tzinfo=SETTINGS.timezone,
-    )
-    end_dt = datetime.combine(
-        date.fromisoformat(slot_date),
-        time.fromisoformat(end_time),
-        tzinfo=SETTINGS.timezone,
-    )
+    start_dt, end_dt = build_actual_range(slot_date, start_time, end_time)
 
-    mecca_range = f"{format_hour(start_dt)}-{format_hour(end_dt)}"
+    mecca_range = f"{format_display_hour(start_dt)}-{format_display_hour(end_dt.astimezone(SETTINGS.timezone))}"
 
     lines = [
         f"اليوم : {format_date_slash(slot_date)}",
@@ -108,7 +139,7 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
     if SETTINGS.secondary_timezone:
         alt_start = start_dt.astimezone(SETTINGS.secondary_timezone)
         alt_end = end_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_range = f"{format_hour(alt_start)}-{format_hour(alt_end)}"
+        alt_range = f"{format_display_hour(alt_start)}-{format_display_hour(alt_end)}"
         lines.append(f"و {alt_range} بتوقيت المغرب العربي")
 
     return "\n".join(lines)
@@ -322,7 +353,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.effective_message.reply_text(
                 "لم أتمكن من قراءة الأوقات. أرسلها بهذه الصيغة:\n"
                 "7:30-8:30\n"
-                "09:00-10:00\n"
+                "9:00-10:00\n"
                 "١١:٠٠-١٢:٠٠"
             )
             return
@@ -762,20 +793,16 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
         try:
             start_norm = normalize_time_string(start_raw)
             end_norm = normalize_time_string(end_raw)
-            start_t = time.fromisoformat(start_norm)
-            end_t = time.fromisoformat(end_norm)
+            time.fromisoformat(start_norm)
+            time.fromisoformat(end_norm)
         except ValueError:
-            valid = False
-            continue
-
-        if end_t <= start_t:
             valid = False
             continue
 
         result = DB.upsert_slot(
             slot_date,
-            start_t.strftime("%H:%M"),
-            end_t.strftime("%H:%M"),
+            start_norm,
+            end_norm,
             created_by,
         )
         if result == "created":
@@ -797,7 +824,7 @@ async def reminder_loop(app: Application) -> None:
     while True:
         try:
             now = now_local()
-            due = DB.get_due_notifications(now)
+            due = DB.get_due_notifications(now.replace(tzinfo=None))
             for item in due:
                 booking: Booking = item["booking"]
                 kind = item["kind"]
