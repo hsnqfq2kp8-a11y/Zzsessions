@@ -40,7 +40,22 @@ logger = logging.getLogger(__name__)
 
 SETTINGS: Settings = load_settings()
 DB = Database(SETTINGS.db_path)
-TIME_RANGE_RE = re.compile(r"^\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$")
+TIME_RANGE_RE = re.compile(r"^\s*(\d{1,2}:\d{1,2})\s*-\s*(\d{1,2}:\d{1,2})\s*$")
+ARABIC_TO_ENGLISH_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+
+def normalize_digits(value: str) -> str:
+    return value.translate(ARABIC_TO_ENGLISH_DIGITS)
+
+
+def normalize_time_string(value: str) -> str:
+    value = normalize_digits(value).strip()
+    if ":" not in value:
+        raise ValueError("Invalid time format")
+    hour_part, minute_part = value.split(":", 1)
+    hour_part = hour_part.strip().zfill(2)
+    minute_part = minute_part.strip().zfill(2)
+    return f"{hour_part}:{minute_part}"
 
 
 def now_local() -> datetime:
@@ -298,14 +313,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         results = add_slots_from_text(slot_date, text, user.id)
-        user_data.pop("state", None)
-        user_data.pop("manager_selected_date", None)
 
         if not results["valid"]:
             await update.effective_message.reply_text(
-                "لم أتمكن من قراءة الأوقات. أرسلها بهذه الصيغة:\n11:00-12:00\n12:00-13:00"
+                "لم أتمكن من قراءة الأوقات. أرسلها بهذه الصيغة:\n"
+                "7:30-8:30\n"
+                "09:00-10:00\n"
+                "١١:٠٠-١٢:٠٠"
             )
             return
+
+        user_data.pop("state", None)
+        user_data.pop("manager_selected_date", None)
 
         await update.effective_message.reply_text(
             f"{texts.MANAGER_ADD_DONE}\n\n"
@@ -720,7 +739,8 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
 
 
 def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
-    parts = [p.strip() for p in re.split(r"[\n,]+", text) if p.strip()]
+    normalized_text = normalize_digits(text)
+    parts = [p.strip() for p in re.split(r"[\n,]+", normalized_text) if p.strip()]
     valid = True
     created = 0
     reactivated = 0
@@ -735,8 +755,10 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
         start_raw, end_raw = match.groups()
 
         try:
-            start_t = time.fromisoformat(start_raw)
-            end_t = time.fromisoformat(end_raw)
+            start_norm = normalize_time_string(start_raw)
+            end_norm = normalize_time_string(end_raw)
+            start_t = time.fromisoformat(start_norm)
+            end_t = time.fromisoformat(end_norm)
         except ValueError:
             valid = False
             continue
@@ -745,7 +767,12 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
             valid = False
             continue
 
-        result = DB.upsert_slot(slot_date, start_t.strftime("%H:%M"), end_t.strftime("%H:%M"), created_by)
+        result = DB.upsert_slot(
+            slot_date,
+            start_t.strftime("%H:%M"),
+            end_t.strftime("%H:%M"),
+            created_by,
+        )
         if result == "created":
             created += 1
         elif result == "reactivated":
@@ -754,7 +781,7 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
             exists += 1
 
     return {
-        "valid": valid and bool(parts),
+        "valid": bool(parts) and valid,
         "created": created,
         "reactivated": reactivated,
         "exists": exists,
