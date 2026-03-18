@@ -191,7 +191,13 @@ async def send_main_menu(message, text: str | None = None) -> None:
 
 async def show_client_calendar_message(target, month_year: tuple[int, int] | None = None) -> None:
     now = now_local()
-    year, month = month_year or (now.year, now.month)
+
+    if month_year is None:
+        first_available = DB.get_first_available_month(now.date().isoformat(), now.strftime("%H:%M"))
+        year, month = first_available or (now.year, now.month)
+    else:
+        year, month = month_year
+
     available_days = DB.get_available_dates_for_month(year, month, now.date().isoformat(), now.strftime("%H:%M"))
     text_value = texts.CHOOSE_DAY if available_days else texts.NO_DATES
     markup = calendar_keyboard(year, month, available_days, "client", now.date())
@@ -326,6 +332,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await update.effective_message.reply_text(
             f"{texts.MANAGER_ADD_DONE}\n\n"
+            f"تم تحديث جدول المواعيد مباشرة.\n"
             f"تمت الإضافة: {results['created']}\n"
             f"معاد تفعيلها: {results['reactivated']}\n"
             f"موجودة مسبقًا: {results['exists']}",
