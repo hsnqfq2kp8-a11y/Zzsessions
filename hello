@@ -1,1 +1,126 @@
- bot
+import logging
+import os
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_NAME = os.getenv("BOT_NAME", "بوتي")
+ADMIN_ID = os.getenv("ADMIN_ID")  # اختياري
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing")
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    text = (
+        f"أهلًا {user.first_name or 'صديقي'} 👋\n"
+        f"أنا {BOT_NAME}\n\n"
+        "الأوامر المتاحة:\n"
+        "/start - بدء البوت\n"
+        "/help - المساعدة\n"
+        "/id - عرض معلوماتك\n"
+        "/ping - اختبار أن البوت يعمل\n"
+    )
+    await update.message.reply_text(text)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "هذا بوت مبدئي قابل للتطوير.\n\n"
+        "حالياً يقدر:\n"
+        "- يستقبل الرسائل\n"
+        "- يرد على الأوامر الأساسية\n"
+        "- يرد على بعض الكلمات المفتاحية\n\n"
+        "نقدر نضيف لاحقًا:\n"
+        "- أزرار inline keyboard\n"
+        "- قاعدة بيانات\n"
+        "- لوحة تحكم للمشرف\n"
+        "- اشتراك مدفوع\n"
+        "- تكامل API خارجي\n"
+    )
+    await update.message.reply_text(text)
+
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("pong ✅")
+
+
+async def user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    text = (
+        f"User ID: {user.id}\n"
+        f"Chat ID: {chat.id}\n"
+        f"Username: @{user.username}" if user.username else f"User ID: {user.id}\nChat ID: {chat.id}"
+    )
+    await update.message.reply_text(text)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip().lower()
+
+    if "السلام" in text or "مرحبا" in text or "هلا" in text:
+        await update.message.reply_text("وعليكم السلام 🌷")
+        return
+
+    if "وقت" in text:
+        await update.message.reply_text("حالياً ما عندي خدمة وقت مخصصة، لكن أقدر أضيفها لك.")
+        return
+
+    if "من انت" in text or "مين انت" in text:
+        await update.message.reply_text(f"أنا {BOT_NAME}، بوت تيلقرام مبني بلغة بايثون.")
+        return
+
+    await update.message.reply_text(
+        "وصلتني رسالتك ✅\n"
+        f"أنت كتبت: {update.message.text}"
+    )
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Exception while handling an update:", exc_info=context.error)
+
+    try:
+        if ADMIN_ID:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_ID),
+                text=f"⚠️ حصل خطأ في البوت:\n{context.error}"
+            )
+    except Exception:
+        logger.exception("Failed to notify admin about the error")
+
+
+def main() -> None:
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("id", user_id))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    app.add_error_handler(error_handler)
+
+    logger.info("Bot is starting...")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
