@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, date, time
+from datetime import date, datetime, time
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, CallbackQuery, Update
 from telegram.constants import ChatType, ParseMode
@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 from config import Settings, load_settings
-from database import Booking, Database, Slot
+from database import Booking, Database
 from keyboards import (
     booking_summary_keyboard,
     bookings_list_keyboard,
@@ -85,10 +85,7 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
     start_dt = datetime.combine(date.fromisoformat(slot_date), time.fromisoformat(start_time), tzinfo=SETTINGS.timezone)
     end_dt = datetime.combine(date.fromisoformat(slot_date), time.fromisoformat(end_time), tzinfo=SETTINGS.timezone)
 
-    mecca_range = (
-        f"{format_hour_12(start_dt)} {format_period(start_dt)}-"
-        f"{format_hour_12(end_dt)} {format_period(end_dt)}"
-    )
+    mecca_range = f"{format_hour_12(start_dt)} {format_period(start_dt)}-{format_hour_12(end_dt)} {format_period(end_dt)}"
 
     lines = [
         f"اليوم : {format_date_slash(slot_date)}",
@@ -98,10 +95,7 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
     if SETTINGS.secondary_timezone:
         alt_start = start_dt.astimezone(SETTINGS.secondary_timezone)
         alt_end = end_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_range = (
-            f"{format_hour_12(alt_start)} {format_period(alt_start)}-"
-            f"{format_hour_12(alt_end)} {format_period(alt_end)}"
-        )
+        alt_range = f"{format_hour_12(alt_start)} {format_period(alt_start)}-{format_hour_12(alt_end)} {format_period(alt_end)}"
         lines.append(f"و {alt_range} بتوقيت {clean_secondary_label(SETTINGS.secondary_timezone_label)}")
 
     return "\n".join(lines)
@@ -128,63 +122,54 @@ def format_booking_details(
 
 
 def booking_summary_text(draft: dict) -> str:
-    return (
-        f"{texts.BOOKING_SUMMARY_TITLE}\n\n"
-        f"{format_booking_details(
-            draft['slot_date'],
-            draft['start_time'],
-            draft['end_time'],
-            draft['client_name'],
-            draft['client_telegram'],
-            draft['session_type'],
-        )}\n\n"
-        "هل تريد تأكيد الحجز؟"
+    details = format_booking_details(
+        draft["slot_date"],
+        draft["start_time"],
+        draft["end_time"],
+        draft["client_name"],
+        draft["client_telegram"],
+        draft["session_type"],
     )
+    return f"{texts.BOOKING_SUMMARY_TITLE}\n\n{details}\n\nهل تريد تأكيد الحجز؟"
 
 
 def booking_confirmation_text(booking: Booking) -> str:
-    return (
-        "تم حجز جلسة ✅\n\n"
-        f"{format_booking_details(
-            booking.slot_date,
-            booking.start_time,
-            booking.end_time,
-            booking.client_name,
-            booking.client_telegram,
-            booking.session_type,
-            booking.id,
-        )}"
+    details = format_booking_details(
+        booking.slot_date,
+        booking.start_time,
+        booking.end_time,
+        booking.client_name,
+        booking.client_telegram,
+        booking.session_type,
+        booking.id,
     )
+    return f"تم حجز جلسة ✅\n\n{details}"
 
 
 def booking_cancellation_text(booking: Booking) -> str:
-    return (
-        "تم إلغاء حجز\n\n"
-        f"{format_booking_details(
-            booking.slot_date,
-            booking.start_time,
-            booking.end_time,
-            booking.client_name,
-            booking.client_telegram,
-            booking.session_type,
-            booking.id,
-        )}"
+    details = format_booking_details(
+        booking.slot_date,
+        booking.start_time,
+        booking.end_time,
+        booking.client_name,
+        booking.client_telegram,
+        booking.session_type,
+        booking.id,
     )
+    return f"تم إلغاء حجز\n\n{details}"
 
 
 def reminder_text(booking: Booking, title: str) -> str:
-    return (
-        f"{title}\n\n"
-        f"{format_booking_details(
-            booking.slot_date,
-            booking.start_time,
-            booking.end_time,
-            booking.client_name,
-            booking.client_telegram,
-            booking.session_type,
-            booking.id,
-        )}"
+    details = format_booking_details(
+        booking.slot_date,
+        booking.start_time,
+        booking.end_time,
+        booking.client_name,
+        booking.client_telegram,
+        booking.session_type,
+        booking.id,
     )
+    return f"{title}\n\n{details}"
 
 
 async def send_main_menu(message, text: str | None = None) -> None:
@@ -195,13 +180,13 @@ async def show_client_calendar_message(target, month_year: tuple[int, int] | Non
     now = now_local()
     year, month = month_year or (now.year, now.month)
     available_days = DB.get_available_dates_for_month(year, month, now.date().isoformat(), now.strftime("%H:%M"))
-    text = texts.CHOOSE_DAY if available_days else texts.NO_DATES
+    text_value = texts.CHOOSE_DAY if available_days else texts.NO_DATES
     markup = calendar_keyboard(year, month, available_days, "client", now.date())
 
     if isinstance(target, CallbackQuery):
-        await target.edit_message_text(text, reply_markup=markup)
+        await target.edit_message_text(text_value, reply_markup=markup)
     else:
-        await target.reply_text(text, reply_markup=markup)
+        await target.reply_text(text_value, reply_markup=markup)
 
 
 async def show_manager_calendar_message(query: CallbackQuery, mode: str, year: int | None = None, month: int | None = None) -> None:
@@ -397,7 +382,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if mode == "manager_remove_day":
             success, reason, count = DB.remove_day(iso_date)
             if success:
-                await query.edit_message_text(f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {iso_date}\nعدد الأوقات المحذوفة: {count}")
+                await query.edit_message_text(
+                    f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {iso_date}\nعدد الأوقات المحذوفة: {count}"
+                )
             elif reason == "booked":
                 await query.edit_message_text(texts.MANAGER_REMOVE_DAY_BLOCKED)
             else:
@@ -476,7 +463,9 @@ async def begin_booking_from_slot(query: CallbackQuery, context: ContextTypes.DE
         return
 
     now = now_local()
-    available_now = {s.id: s for s in DB.get_available_slots(slot.slot_date, now.date().isoformat(), now.strftime("%H:%M"))}
+    available_now = {
+        s.id: s for s in DB.get_available_slots(slot.slot_date, now.date().isoformat(), now.strftime("%H:%M"))
+    }
     if slot_id not in available_now:
         await query.edit_message_text(texts.BOOKING_EXPIRED)
         return
@@ -575,9 +564,17 @@ async def prompt_cancel_booking(query: CallbackQuery, booking_id: int) -> None:
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
+    details = format_booking_details(
+        booking.slot_date,
+        booking.start_time,
+        booking.end_time,
+        booking.client_name,
+        booking.client_telegram,
+        booking.session_type,
+        booking.id,
+    )
     await query.edit_message_text(
-        f"هل تريد إلغاء هذا الحجز؟\n\n"
-        f"{format_booking_details(booking.slot_date, booking.start_time, booking.end_time, booking.client_name, booking.client_telegram, booking.session_type, booking.id)}",
+        f"هل تريد إلغاء هذا الحجز؟\n\n{details}",
         reply_markup=cancel_booking_keyboard(booking_id),
     )
 
@@ -725,7 +722,9 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
 def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
     parts = [p.strip() for p in re.split(r"[\n,]+", text) if p.strip()]
     valid = True
-    created = reactivated = exists = 0
+    created = 0
+    reactivated = 0
+    exists = 0
 
     for part in parts:
         match = TIME_RANGE_RE.match(part)
