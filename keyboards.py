@@ -29,6 +29,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton("عرض المواعيد المتاحة")],
             [KeyboardButton("مواعيدي")],
             [KeyboardButton("إلغاء حجز")],
+            [KeyboardButton("اختيار الدولة")],
             [KeyboardButton("تواصل مع المنسقات")],
         ],
         resize_keyboard=True,
@@ -100,6 +101,20 @@ def manager_slots_remove_keyboard(slot_buttons: list[tuple[int, str]]) -> Inline
         [InlineKeyboardButton(f"حذف {label}", callback_data=f"remove_slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
+    rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def country_keyboard(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for code, label in items:
+        row.append(InlineKeyboardButton(label, callback_data=f"set_country:{code}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
     return InlineKeyboardMarkup(rows)
 
