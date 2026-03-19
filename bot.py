@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import html
 import logging
 import re
+import textwrap
 import unicodedata
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -31,6 +33,8 @@ from keyboards import (
     main_menu_keyboard,
     manager_bookings_remove_keyboard,
     manager_slots_remove_keyboard,
+    offers_back_keyboard,
+    offers_sections_keyboard,
     panel_keyboard,
     slots_keyboard,
 )
@@ -347,23 +351,50 @@ def format_offer_row(name: str, price: str, width: int) -> str:
     return f"\u200E{price}\u200E{' ' * spaces}\u200F{name}\u200F"
 
 
-def format_offers_message() -> str:
-    sections: list[str] = []
+def format_offer_section_message(section_key: str) -> str:
+    title, items = texts.OFFERS_SECTIONS[section_key]
+    chunks: list[str] = [f"<b>{html.escape(title)} :</b>"]
 
-    for title, items, footer in texts.OFFERS_SECTIONS:
-        max_len = max(len(name) + len(price) for name, price in items)
-        width = min(max(max_len + 6, 28), 58)
-        rows = "\n".join(format_offer_row(name, price, width) for name, price in items)
-        sections.append(f"<b>{title} :</b>\n<pre>{rows}</pre>\n{footer}")
+    row_buffer: list[str] = []
 
-    return "\n\n".join(sections)
+    for name, price in items:
+        short_enough = len(name) <= 28
+        if short_enough:
+            row_buffer.append(format_offer_row(name, price, 42))
+            continue
+
+        if row_buffer:
+            chunks.append(f"<pre>{html.escape(chr(10).join(row_buffer))}</pre>")
+            row_buffer = []
+
+        wrapped_name = "\n".join(
+            html.escape(line)
+            for line in textwrap.wrap(name, width=34, break_long_words=False, break_on_hyphens=False)
+        )
+        chunks.append(f"• {wrapped_name}\n<b>السعر:</b> {html.escape(price)}")
+
+    if row_buffer:
+        chunks.append(f"<pre>{html.escape(chr(10).join(row_buffer))}</pre>")
+
+    return "\n\n".join(chunks)
 
 
-async def send_offers_message(message) -> None:
+async def send_offers_menu_message(message) -> None:
     await message.reply_text(
-        format_offers_message(),
+        texts.OFFERS_MENU_TITLE,
+        reply_markup=offers_sections_keyboard(),
+    )
+
+
+async def show_offer_section(query: CallbackQuery, section_key: str) -> None:
+    if section_key not in texts.OFFERS_SECTIONS:
+        await query.edit_message_text(texts.GENERIC_ERROR)
+        return
+
+    await query.edit_message_text(
+        format_offer_section_message(section_key),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=offers_back_keyboard(),
     )
 
 
@@ -619,7 +650,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if text == "العروض":
-        await send_offers_message(update.effective_message)
+        await send_offers_menu_message(update.effective_message)
         return
 
     if text == "مواعيدي":
@@ -651,6 +682,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "go:home":
         clear_booking_flow(context.user_data)
         await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
+        return
+
+    if data == "offers:menu":
+        await query.edit_message_text(
+            texts.OFFERS_MENU_TITLE,
+            reply_markup=offers_sections_keyboard(),
+        )
+        return
+
+    if data.startswith("offers:"):
+        section_key = data.split(":", 1)[1]
+        await show_offer_section(query, section_key)
         return
 
     if data.startswith("country_open:"):
