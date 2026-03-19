@@ -27,6 +27,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("عرض المواعيد المتاحة")],
+            [KeyboardButton("العروض")],
             [KeyboardButton("مواعيدي")],
             [KeyboardButton("إلغاء حجز")],
             [KeyboardButton("تواصل مع المنسقات")],
