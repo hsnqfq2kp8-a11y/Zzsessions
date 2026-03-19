@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, CallbackQuery, Update
 from telegram.constants import ChatType, ParseMode
@@ -24,6 +25,7 @@ from keyboards import (
     bookings_list_keyboard,
     calendar_keyboard,
     cancel_booking_keyboard,
+    country_keyboard,
     main_menu_keyboard,
     manager_bookings_remove_keyboard,
     manager_slots_remove_keyboard,
@@ -40,24 +42,48 @@ logger = logging.getLogger(__name__)
 
 SETTINGS: Settings = load_settings()
 DB = Database(SETTINGS.db_path)
-TIME_RANGE_RE = re.compile(r"^\s*(\d{1,2}:\d{1,2})\s*-\s*(\d{1,2}:\d{1,2})\s*$")
+HOUR_ONLY_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{1,2}))?\s*$")
 ARABIC_TO_ENGLISH_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+COUNTRY_OPTIONS = {
+    "SA": ("السعودية", "Asia/Riyadh"),
+    "KW": ("الكويت", "Asia/Kuwait"),
+    "AE": ("الإمارات", "Asia/Dubai"),
+    "QA": ("قطر", "Asia/Qatar"),
+    "BH": ("البحرين", "Asia/Bahrain"),
+    "OM": ("عمان", "Asia/Muscat"),
+    "IQ": ("العراق", "Asia/Baghdad"),
+    "JO": ("الأردن", "Asia/Amman"),
+    "LB": ("لبنان", "Asia/Beirut"),
+    "PS": ("فلسطين", "Asia/Hebron"),
+    "EG": ("مصر", "Africa/Cairo"),
+    "LY": ("ليبيا", "Africa/Tripoli"),
+    "TN": ("تونس", "Africa/Tunis"),
+    "DZ": ("الجزائر", "Africa/Algiers"),
+    "MA": ("المغرب العربي", "Africa/Casablanca"),
+}
 
 
 def normalize_digits(value: str) -> str:
     return value.translate(ARABIC_TO_ENGLISH_DIGITS)
 
 
-def normalize_time_string(value: str) -> str:
+def normalize_hour_input(value: str) -> str:
     value = normalize_digits(value).strip()
-    if ":" not in value:
-        raise ValueError("Invalid time format")
-    hour_part, minute_part = value.split(":", 1)
-    hour = int(hour_part.strip())
-    minute = int(minute_part.strip())
+    match = HOUR_ONLY_RE.match(value)
+    if not match:
+        raise ValueError("Invalid hour format")
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("Invalid time range")
+        raise ValueError("Hour out of range")
     return f"{hour:02d}:{minute:02d}"
+
+
+def add_one_hour(start_time: str) -> str:
+    start_dt = datetime.combine(date(2000, 1, 1), time.fromisoformat(start_time))
+    end_dt = start_dt + timedelta(hours=1)
+    return end_dt.strftime("%H:%M")
 
 
 def now_local() -> datetime:
@@ -84,12 +110,22 @@ def format_date_slash(slot_date: str) -> str:
     return f"{dt.year}/{dt.month}/{dt.day}"
 
 
-def format_display_time(value: str) -> str:
-    hh, mm = value.split(":")
-    return f"{int(hh)}:{mm}"
+def format_hhmm(dt: datetime) -> str:
+    return f"{dt.hour}:{dt.minute:02d}"
 
 
-def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
+def get_user_timezone_and_label(user_id: int | None) -> tuple[ZoneInfo, str]:
+    if user_id is not None:
+        profile = DB.get_user_profile(user_id)
+        if profile:
+            try:
+                return ZoneInfo(profile["timezone_name"]), profile["country_name"]
+            except Exception:
+                pass
+    return SETTINGS.timezone, "مكة المكرمة"
+
+
+def get_slot_datetimes(slot_date: str, start_time: str, end_time: str) -> tuple[datetime, datetime]:
     start_dt = datetime.combine(
         date.fromisoformat(slot_date),
         time.fromisoformat(start_time),
@@ -100,18 +136,18 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
         time.fromisoformat(end_time),
         tzinfo=SETTINGS.timezone,
     )
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    return start_dt, end_dt
 
+
+def format_session_block(slot_date: str, start_time: str, end_time: str, viewer_tz: ZoneInfo, viewer_label: str) -> str:
+    start_dt, _ = get_slot_datetimes(slot_date, start_time, end_time)
+    local_start = start_dt.astimezone(viewer_tz)
     lines = [
-        f"اليوم : {format_date_slash(slot_date)}",
-        f"الساعة : {format_display_time(start_time)}-{format_display_time(end_time)} بتوقيت مكة المكرمة",
+        f"اليوم : {local_start.year}/{local_start.month}/{local_start.day}",
+        f"الساعة : {format_hhmm(local_start)} بتوقيت {viewer_label}",
     ]
-
-    # توقيت المغرب العربي ثابت: أقل بساعتين من توقيت مكة
-    alt_start = start_dt - timedelta(hours=2)
-    alt_end = end_dt - timedelta(hours=2)
-    alt_range = f"{alt_start.hour}:{alt_start.minute:02d}-{alt_end.hour}:{alt_end.minute:02d}"
-    lines.append(f"و {alt_range} بتوقيت المغرب العربي")
-
     return "\n".join(lines)
 
 
@@ -122,20 +158,22 @@ def format_booking_details(
     client_name: str,
     client_telegram: str,
     session_type: str,
+    viewer_tz: ZoneInfo,
+    viewer_label: str,
     booking_id: int | None = None,
 ) -> str:
     lines = [
         f"الاسم : {client_name}",
         f"يوزر التيليغرام : {client_telegram}",
         f"نوع الجلسة : {session_type}",
-        format_session_block(slot_date, start_time, end_time),
+        format_session_block(slot_date, start_time, end_time, viewer_tz, viewer_label),
     ]
     if booking_id is not None:
         lines.append(f"#{booking_id}")
     return "\n".join(lines)
 
 
-def booking_summary_text(draft: dict) -> str:
+def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     details = format_booking_details(
         draft["slot_date"],
         draft["start_time"],
@@ -143,11 +181,13 @@ def booking_summary_text(draft: dict) -> str:
         draft["client_name"],
         draft["client_telegram"],
         draft["session_type"],
+        viewer_tz,
+        viewer_label,
     )
     return f"{texts.BOOKING_SUMMARY_TITLE}\n\n{details}\n\nهل تريد تأكيد الحجز؟"
 
 
-def booking_confirmation_text(booking: Booking) -> str:
+def booking_confirmation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -155,12 +195,14 @@ def booking_confirmation_text(booking: Booking) -> str:
         booking.client_name,
         booking.client_telegram,
         booking.session_type,
+        viewer_tz,
+        viewer_label,
         booking.id,
     )
     return f"تم حجز جلسة ✅\n\n{details}"
 
 
-def booking_cancellation_text(booking: Booking) -> str:
+def booking_cancellation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -168,12 +210,14 @@ def booking_cancellation_text(booking: Booking) -> str:
         booking.client_name,
         booking.client_telegram,
         booking.session_type,
+        viewer_tz,
+        viewer_label,
         booking.id,
     )
     return f"تم إلغاء حجز\n\n{details}"
 
 
-def reminder_text(booking: Booking, title: str) -> str:
+def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -181,6 +225,8 @@ def reminder_text(booking: Booking, title: str) -> str:
         booking.client_name,
         booking.client_telegram,
         booking.session_type,
+        viewer_tz,
+        viewer_label,
         booking.id,
     )
     return f"{title}\n\n{details}"
@@ -192,7 +238,6 @@ async def send_main_menu(message, text: str | None = None) -> None:
 
 async def show_client_calendar_message(target, month_year: tuple[int, int] | None = None) -> None:
     now = now_local()
-
     if month_year is None:
         first_available = DB.get_first_available_month(now.date().isoformat(), now.strftime("%H:%M"))
         year, month = first_available or (now.year, now.month)
@@ -216,8 +261,8 @@ async def show_manager_calendar_message(query: CallbackQuery, mode: str, year: i
     marked = DB.get_manager_dates_for_month(chosen_year, chosen_month, now.date().isoformat())
 
     title = {
-        "manager_add": "اختر اليوم الذي تريد إضافة الأوقات له:",
-        "manager_remove_slot": "اختر اليوم الذي تريد حذف وقت منه:",
+        "manager_add": "اختر اليوم الذي تريد إضافة الساعات له:",
+        "manager_remove_slot": "اختر اليوم الذي تريد حذف ساعة منه:",
         "manager_remove_day": "اختر اليوم الذي تريد حذفه بالكامل:",
     }[mode]
 
@@ -259,11 +304,17 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(texts.FORBIDDEN_PANEL)
         return
 
+    tz_label = get_user_timezone_and_label(user.id)[1]
     await update.effective_message.reply_text(
-        f"{texts.PANEL_HEADER}\n\nمعرّفك الحالي: <code>{user.id}</code>",
+        f"{texts.PANEL_HEADER}\n\nمعرّفك الحالي: <code>{user.id}</code>\nالدولة الحالية: {tz_label}",
         parse_mode=ParseMode.HTML,
         reply_markup=panel_keyboard(DB.is_booking_open()),
     )
+
+
+async def show_country_picker(message) -> None:
+    items = [(code, name) for code, (name, _) in COUNTRY_OPTIONS.items()]
+    await message.reply_text("اختر دولتك:", reply_markup=country_keyboard(items))
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -299,8 +350,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         user_data["booking_draft"]["session_type"] = text
         user_data["state"] = "await_booking_confirm"
+        viewer_tz, viewer_label = get_user_timezone_and_label(update.effective_user.id if update.effective_user else None)
         await update.effective_message.reply_text(
-            booking_summary_text(user_data["booking_draft"]),
+            booking_summary_text(user_data["booking_draft"], viewer_tz, viewer_label),
             reply_markup=booking_summary_keyboard(),
         )
         return
@@ -321,11 +373,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if not results["valid"]:
             await update.effective_message.reply_text(
-                "لم أتمكن من قراءة الأوقات. أرسلها بهذه الصيغة:\n"
-                "9:00-10:00\n"
-                "13:00-14:00\n"
-                "00:00-01:00\n"
-                "٢١:٠٠-٢٢:٠٠"
+                "لم أتمكن من قراءة الساعات. أرسلها بهذه الصيغة:\n"
+                "9\n9:00\n13:00\n00:00\n٢١:٠٠"
             )
             return
 
@@ -361,6 +410,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.effective_message.reply_text(texts.COORDINATORS_TEXT, reply_markup=main_menu_keyboard())
         return
 
+    if text == "اختيار الدولة":
+        await show_country_picker(update.effective_message)
+        return
+
     await update.effective_message.reply_text(texts.UNKNOWN_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -377,6 +430,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "go:home":
         clear_booking_flow(context.user_data)
+        await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
+        return
+
+    if data.startswith("set_country:"):
+        code = data.split(":", 1)[1]
+        selected = COUNTRY_OPTIONS.get(code)
+        if not selected:
+            await query.edit_message_text(texts.GENERIC_ERROR)
+            return
+        country_name, timezone_name = selected
+        DB.set_user_profile(query.from_user.id, country_name, timezone_name)
+        await query.edit_message_text(f"تم حفظ دولتك بنجاح: {country_name}")
         await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
         return
 
@@ -411,7 +476,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             success, reason, count = DB.remove_day(iso_date)
             if success:
                 await query.edit_message_text(
-                    f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {format_date_slash(iso_date)}\nعدد الأوقات المحذوفة: {count}"
+                    f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {format_date_slash(iso_date)}\nعدد الساعات المحذوفة: {count}"
                 )
             elif reason == "booked":
                 await query.edit_message_text(texts.MANAGER_REMOVE_DAY_BLOCKED)
@@ -477,8 +542,15 @@ async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
         await query.edit_message_text(texts.NO_SLOTS)
         return
 
+    viewer_tz, _ = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
     selected_date = date.fromisoformat(iso_date)
-    button_data = [(slot.id, f"{format_display_time(slot.start_time)}-{format_display_time(slot.end_time)}") for slot in slots]
+    button_data: list[tuple[int, str]] = []
+
+    for slot in slots:
+        start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
+        local_start = start_dt.astimezone(viewer_tz)
+        button_data.append((slot.id, format_hhmm(local_start)))
+
     await query.edit_message_text(
         f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
         reply_markup=slots_keyboard(button_data, selected_date.year, selected_date.month),
@@ -507,8 +579,9 @@ async def begin_booking_from_slot(query: CallbackQuery, context: ContextTypes.DE
     }
     context.user_data["state"] = "await_name"
 
+    viewer_tz, viewer_label = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
     await query.edit_message_text(
-        f"تم اختيار الموعد التالي:\n\n{format_session_block(slot.slot_date, slot.start_time, slot.end_time)}\n\n{texts.ASK_NAME}"
+        f"تم اختيار الموعد التالي:\n\n{format_session_block(slot.slot_date, slot.start_time, slot.end_time, viewer_tz, viewer_label)}\n\n{texts.ASK_NAME}"
     )
 
 
@@ -541,14 +614,19 @@ async def finalize_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(texts.GENERIC_ERROR)
         return
 
-    confirmation = booking_confirmation_text(booking)
+    client_tz, client_label = get_user_timezone_and_label(user.id)
+    confirmation = booking_confirmation_text(booking, client_tz, client_label)
 
     await query.edit_message_text(confirmation)
     await query.message.reply_text("تم حفظ الموعد في سجلك.", reply_markup=main_menu_keyboard())
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            await context.bot.send_message(chat_id=manager_id, text=confirmation)
+            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
+            await context.bot.send_message(
+                chat_id=manager_id,
+                text=booking_confirmation_text(booking, manager_tz, manager_label),
+            )
         except Exception:
             logger.exception("Failed to notify manager %s about new booking", manager_id)
 
@@ -562,6 +640,7 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
         await update.effective_message.reply_text(texts.NO_USER_BOOKINGS, reply_markup=main_menu_keyboard())
         return
 
+    viewer_tz, viewer_label = get_user_timezone_and_label(user.id)
     header = "هذه مواعيدك القادمة:" if not cancel_mode else "اختر الحجز الذي تريد إلغاءه:"
     lines = [header, ""]
     booking_ids: list[int] = []
@@ -575,6 +654,8 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
                 booking.client_name,
                 booking.client_telegram,
                 booking.session_type,
+                viewer_tz,
+                viewer_label,
                 booking.id,
             )
         )
@@ -593,6 +674,7 @@ async def prompt_cancel_booking(query: CallbackQuery, booking_id: int) -> None:
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
+    viewer_tz, viewer_label = get_user_timezone_and_label(user.id)
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -600,6 +682,8 @@ async def prompt_cancel_booking(query: CallbackQuery, booking_id: int) -> None:
         booking.client_name,
         booking.client_telegram,
         booking.session_type,
+        viewer_tz,
+        viewer_label,
         booking.id,
     )
     await query.edit_message_text(
@@ -621,13 +705,18 @@ async def confirm_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
-    cancellation = booking_cancellation_text(booking)
+    client_tz, client_label = get_user_timezone_and_label(user.id)
+    cancellation = booking_cancellation_text(booking, client_tz, client_label)
     await query.edit_message_text(cancellation)
     await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            await context.bot.send_message(chat_id=manager_id, text=cancellation)
+            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
+            await context.bot.send_message(
+                chat_id=manager_id,
+                text=booking_cancellation_text(booking, manager_tz, manager_label),
+            )
         except Exception:
             logger.exception("Failed to notify manager %s about cancellation", manager_id)
 
@@ -647,11 +736,16 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
-    cancellation = booking_cancellation_text(booking)
+    manager_tz, manager_label = get_user_timezone_and_label(query.from_user.id)
+    cancellation = booking_cancellation_text(booking, manager_tz, manager_label)
     await query.edit_message_text(cancellation)
 
     try:
-        await context.bot.send_message(chat_id=booking.client_chat_id, text=cancellation)
+        client_tz, client_label = get_user_timezone_and_label(booking.client_user_id)
+        await context.bot.send_message(
+            chat_id=booking.client_chat_id,
+            text=booking_cancellation_text(booking, client_tz, client_label),
+        )
     except Exception:
         logger.exception("Failed to notify client about manager cancellation")
 
@@ -659,7 +753,11 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         if manager_id == query.from_user.id:
             continue
         try:
-            await context.bot.send_message(chat_id=manager_id, text=cancellation)
+            other_tz, other_label = get_user_timezone_and_label(manager_id)
+            await context.bot.send_message(
+                chat_id=manager_id,
+                text=booking_cancellation_text(booking, other_tz, other_label),
+            )
         except Exception:
             logger.exception("Failed to notify manager %s about manager cancellation", manager_id)
 
@@ -701,6 +799,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
             await query.edit_message_text(texts.PANEL_NO_BOOKINGS)
             return
 
+        viewer_tz, viewer_label = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
         chunks: list[str] = []
         current: list[str] = []
 
@@ -712,6 +811,8 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
                 booking.client_name,
                 booking.client_telegram,
                 booking.session_type,
+                viewer_tz,
+                viewer_label,
                 booking.id,
             )
             if len("\n\n".join(current + [block])) > 3500 and current:
@@ -743,39 +844,26 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
         return
 
     await query.edit_message_text(
-        f"اختر الوقت الذي تريد حذفه من يوم {format_date_slash(iso_date)}:",
+        f"اختر الساعة التي تريد حذفها من يوم {format_date_slash(iso_date)}:",
         reply_markup=manager_slots_remove_keyboard(
-            [(slot.id, f"{format_display_time(slot.start_time)}-{format_display_time(slot.end_time)}") for slot in slots]
+            [(slot.id, format_hhmm(datetime.combine(date.today(), time.fromisoformat(slot.start_time)))) for slot in slots]
         ),
     )
 
 
 def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
     normalized_text = normalize_digits(text)
-    parts = [p.strip() for p in re.split(r"[\n,]+", normalized_text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"[\s,]+", normalized_text) if p.strip()]
     valid = True
     created = 0
     reactivated = 0
     exists = 0
 
     for part in parts:
-        match = TIME_RANGE_RE.match(part)
-        if not match:
-            valid = False
-            continue
-
-        start_raw, end_raw = match.groups()
-
         try:
-            start_norm = normalize_time_string(start_raw)
-            end_norm = normalize_time_string(end_raw)
-            start_time_obj = time.fromisoformat(start_norm)
-            end_time_obj = time.fromisoformat(end_norm)
+            start_norm = normalize_hour_input(part)
+            end_norm = add_one_hour(start_norm)
         except ValueError:
-            valid = False
-            continue
-
-        if end_time_obj <= start_time_obj:
             valid = False
             continue
 
@@ -812,33 +900,42 @@ async def reminder_loop(app: Application) -> None:
 
 async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
     if kind == "hour":
-        text_value = reminder_text(booking, "جلستك بعد ساعة")
+        client_title = "جلستك بعد ساعة"
+        manager_title = "الجلسة بعد ساعة"
     elif kind == "start":
-        text_value = reminder_text(booking, "حان موعد جلستك")
+        client_title = "حان موعد جلستك"
+        manager_title = "حان موعد الجلسة"
     else:
         return
 
     try:
-        await app.bot.send_message(chat_id=booking.client_chat_id, text=text_value)
+        client_tz, client_label = get_user_timezone_and_label(booking.client_user_id)
+        await app.bot.send_message(
+            chat_id=booking.client_chat_id,
+            text=reminder_text(booking, client_title, client_tz, client_label),
+        )
     except Exception:
         logger.exception("Failed to send reminder to client %s", booking.client_chat_id)
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            await app.bot.send_message(chat_id=manager_id, text=text_value)
+            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
+            await app.bot.send_message(
+                chat_id=manager_id,
+                text=reminder_text(booking, manager_title, manager_tz, manager_label),
+            )
         except Exception:
             logger.exception("Failed to send reminder to manager %s", manager_id)
 
 
 async def post_init(application: Application) -> None:
-    public_commands = [
+    public_non_manager = [
         BotCommand("start", "بدء البوت"),
         BotCommand("help", "المساعدة"),
     ]
-    manager_commands = public_commands + [BotCommand("panel", "لوحة الإدارة")]
+    manager_commands = public_non_manager + [BotCommand("panel", "لوحة الإدارة")]
 
-    await application.bot.set_my_commands(public_commands, scope=BotCommandScopeAllPrivateChats())
-
+    await application.bot.set_my_commands(public_non_manager, scope=BotCommandScopeAllPrivateChats())
     for manager_id in SETTINGS.manager_ids:
         try:
             await application.bot.set_my_commands(manager_commands, scope=BotCommandScopeChat(chat_id=manager_id))
