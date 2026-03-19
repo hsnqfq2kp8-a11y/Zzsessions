@@ -29,7 +29,6 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton("عرض المواعيد المتاحة")],
             [KeyboardButton("مواعيدي")],
             [KeyboardButton("إلغاء حجز")],
-            [KeyboardButton("اختيار الدولة")],
             [KeyboardButton("تواصل مع المنسقات")],
         ],
         resize_keyboard=True,
@@ -87,11 +86,12 @@ def manager_bookings_remove_keyboard(booking_ids: list[int]) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
-def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int) -> InlineKeyboardMarkup:
+def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int, iso_date: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(label, callback_data=f"slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
+    rows.append([InlineKeyboardButton("تغيير البلد", callback_data=f"country_open:{iso_date}")])
     rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{year}:{month}")])
     return InlineKeyboardMarkup(rows)
 
@@ -105,17 +105,27 @@ def manager_slots_remove_keyboard(slot_buttons: list[tuple[int, str]]) -> Inline
     return InlineKeyboardMarkup(rows)
 
 
-def country_keyboard(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+def country_keyboard(items: list[tuple[str, str]], pending_date: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
+
     for code, label in items:
         row.append(InlineKeyboardButton(label, callback_data=f"set_country:{code}"))
         if len(row) == 2:
             rows.append(row)
             row = []
+
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
+
+    rows.append([InlineKeyboardButton("بلد آخر", callback_data="set_country:OTHER")])
+
+    if pending_date:
+        dt = date.fromisoformat(pending_date)
+        rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{dt.year}:{dt.month}")])
+    else:
+        rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
+
     return InlineKeyboardMarkup(rows)
 
 
