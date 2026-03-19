@@ -342,6 +342,31 @@ def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_labe
     return f"{title}\n\n{details}"
 
 
+def format_offer_row(name: str, price: str, width: int) -> str:
+    spaces = max(2, width - len(name) - len(price))
+    return f"\u200E{price}\u200E{' ' * spaces}\u200F{name}\u200F"
+
+
+def format_offers_message() -> str:
+    sections: list[str] = []
+
+    for title, items, footer in texts.OFFERS_SECTIONS:
+        max_len = max(len(name) + len(price) for name, price in items)
+        width = min(max(max_len + 6, 28), 58)
+        rows = "\n".join(format_offer_row(name, price, width) for name, price in items)
+        sections.append(f"<b>{title} :</b>\n<pre>{rows}</pre>\n{footer}")
+
+    return "\n\n".join(sections)
+
+
+async def send_offers_message(message) -> None:
+    await message.reply_text(
+        format_offers_message(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(),
+    )
+
+
 async def send_main_menu(message, text: str | None = None) -> None:
     await message.reply_text(text or texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
@@ -591,6 +616,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.effective_message.reply_text(texts.BOOKING_CLOSED)
             return
         await show_client_calendar_message(update.effective_message)
+        return
+
+    if text == "العروض":
+        await send_offers_message(update.effective_message)
         return
 
     if text == "مواعيدي":
