@@ -60,46 +60,40 @@ class Database:
         raise ValueError(f"Unsupported date format: {value}")
 
     @staticmethod
-    def _parse_hhmm(value: str) -> tuple[int, int]:
-        hour_str, minute_str = value.strip().split(":")
-        return int(hour_str), int(minute_str)
+    def _normalize_time_str(value: str) -> str:
+        raw = (value or "").strip()
+        if ":" not in raw:
+            raise ValueError(f"Unsupported time format: {value}")
+        hh, mm = raw.split(":", 1)
+        hour = int(hh)
+        minute = int(mm)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"Time out of range: {value}")
+        return f"{hour:02d}:{minute:02d}"
 
-    @staticmethod
-    def _map_session_hour(hour_value: int) -> int:
-        if 5 <= hour_value <= 11:
-            return hour_value + 12
-        if hour_value == 12:
-            return 0
-        return hour_value
-
-    def _build_range_datetimes(self, slot_date: str, start_time: str, end_time: str) -> tuple[datetime, datetime]:
+    def _slot_start_dt(self, slot_date: str, start_time: str) -> datetime:
         normalized_date = self._normalize_date_str(slot_date)
-        base_date = date.fromisoformat(normalized_date)
+        normalized_time = self._normalize_time_str(start_time)
+        return datetime.combine(
+            date.fromisoformat(normalized_date),
+            time.fromisoformat(normalized_time),
+        )
 
-        start_hour_raw, start_minute = self._parse_hhmm(start_time)
-        end_hour_raw, end_minute = self._parse_hhmm(end_time)
-
-        explicit_24h = start_hour_raw >= 13 or end_hour_raw >= 13
-
-        if explicit_24h:
-            start_hour_actual = start_hour_raw
-            end_hour_actual = end_hour_raw
-        else:
-            start_hour_actual = self._map_session_hour(start_hour_raw)
-            end_hour_actual = self._map_session_hour(end_hour_raw)
-
-        start_dt = datetime.combine(base_date, time(start_hour_actual, start_minute))
-        end_dt = datetime.combine(base_date, time(end_hour_actual, end_minute))
-
-        if end_dt <= start_dt:
-            end_dt += timedelta(days=1)
-
-        return start_dt, end_dt
+    def _slot_end_dt(self, slot_date: str, end_time: str) -> datetime:
+        normalized_date = self._normalize_date_str(slot_date)
+        normalized_time = self._normalize_time_str(end_time)
+        return datetime.combine(
+            date.fromisoformat(normalized_date),
+            time.fromisoformat(normalized_time),
+        )
 
     def _compose_now_dt(self, now_date: str, now_time: str) -> datetime:
         normalized_date = self._normalize_date_str(now_date)
-        now_clock = time.fromisoformat(now_time)
-        return datetime.combine(date.fromisoformat(normalized_date), now_clock)
+        normalized_time = self._normalize_time_str(now_time)
+        return datetime.combine(
+            date.fromisoformat(normalized_date),
+            time.fromisoformat(normalized_time),
+        )
 
     def init_db(self) -> None:
         with self._lock, self.conn:
@@ -155,9 +149,9 @@ class Database:
                     "INSERT INTO settings(key, value) VALUES('booking_open', '1')"
                 )
 
-            self._migrate_slot_dates()
+            self._migrate_slot_dates_and_times()
 
-    def _migrate_slot_dates(self) -> None:
+    def _migrate_slot_dates_and_times(self) -> None:
         rows = self.conn.execute(
             """
             SELECT id, slot_date, start_time, end_time
@@ -167,19 +161,28 @@ class Database:
         ).fetchall()
 
         for row in rows:
-            old_date = row["slot_date"]
             try:
-                new_date = self._normalize_date_str(old_date)
+                new_date = self._normalize_date_str(row["slot_date"])
+                new_start = self._normalize_time_str(row["start_time"])
+                new_end = self._normalize_time_str(row["end_time"])
             except ValueError:
                 continue
 
-            if new_date == old_date:
+            if (
+                new_date == row["slot_date"]
+                and new_start == row["start_time"]
+                and new_end == row["end_time"]
+            ):
                 continue
 
             try:
                 self.conn.execute(
-                    "UPDATE slots SET slot_date=? WHERE id=?",
-                    (new_date, row["id"]),
+                    """
+                    UPDATE slots
+                    SET slot_date=?, start_time=?, end_time=?
+                    WHERE id=?
+                    """,
+                    (new_date, new_start, new_end, row["id"]),
                 )
             except sqlite3.IntegrityError:
                 canonical = self.conn.execute(
@@ -190,7 +193,7 @@ class Database:
                     ORDER BY id
                     LIMIT 1
                     """,
-                    (new_date, row["start_time"], row["end_time"], row["id"]),
+                    (new_date, new_start, new_end, row["id"]),
                 ).fetchone()
 
                 if canonical:
@@ -220,6 +223,8 @@ class Database:
 
     def upsert_slot(self, slot_date: str, start_time: str, end_time: str, created_by: int) -> str:
         normalized_date = self._normalize_date_str(slot_date)
+        normalized_start = self._normalize_time_str(start_time)
+        normalized_end = self._normalize_time_str(end_time)
 
         with self._lock, self.conn:
             existing = self.conn.execute(
@@ -228,7 +233,7 @@ class Database:
                 FROM slots
                 WHERE slot_date=? AND start_time=? AND end_time=?
                 """,
-                (normalized_date, start_time, end_time),
+                (normalized_date, normalized_start, normalized_end),
             ).fetchone()
 
             if existing is None:
@@ -237,7 +242,7 @@ class Database:
                     INSERT INTO slots(slot_date, start_time, end_time, is_active, created_by)
                     VALUES (?, ?, ?, 1, ?)
                     """,
-                    (normalized_date, start_time, end_time, created_by),
+                    (normalized_date, normalized_start, normalized_end, created_by),
                 )
                 return "created"
 
@@ -260,7 +265,7 @@ class Database:
         with self._lock:
             rows = self.conn.execute(
                 """
-                SELECT s.slot_date, s.start_time, s.end_time
+                SELECT s.slot_date, s.start_time
                 FROM slots s
                 WHERE s.is_active=1
                   AND NOT EXISTS (
@@ -273,8 +278,8 @@ class Database:
 
         candidates: list[datetime] = []
         for row in rows:
-            start_dt, end_dt = self._build_range_datetimes(row["slot_date"], row["start_time"], row["end_time"])
-            if end_dt > now_dt:
+            start_dt = self._slot_start_dt(row["slot_date"], row["start_time"])
+            if start_dt > now_dt:
                 candidates.append(start_dt)
 
         if not candidates:
@@ -289,7 +294,7 @@ class Database:
         with self._lock:
             rows = self.conn.execute(
                 """
-                SELECT s.slot_date, s.start_time, s.end_time
+                SELECT s.slot_date, s.start_time
                 FROM slots s
                 WHERE s.is_active=1
                   AND SUBSTR(s.slot_date, 1, 7)=?
@@ -304,8 +309,8 @@ class Database:
 
         available_days: set[int] = set()
         for row in rows:
-            start_dt, end_dt = self._build_range_datetimes(row["slot_date"], row["start_time"], row["end_time"])
-            if end_dt > now_dt:
+            start_dt = self._slot_start_dt(row["slot_date"], row["start_time"])
+            if start_dt > now_dt:
                 available_days.add(int(row["slot_date"][8:10]))
 
         return available_days
@@ -342,19 +347,23 @@ class Database:
                       FROM bookings b
                       WHERE b.slot_id=s.id AND b.status='confirmed'
                   )
+                ORDER BY s.start_time
                 """,
                 (normalized_date,),
             ).fetchall()
 
-        slots: list[tuple[datetime, Slot]] = []
+        slots: list[Slot] = []
         for row in rows:
             slot = Slot(**dict(row))
-            start_dt, end_dt = self._build_range_datetimes(slot.slot_date, slot.start_time, slot.end_time)
-            if now_dt is None or end_dt > now_dt:
-                slots.append((start_dt, slot))
+            if now_dt is None:
+                slots.append(slot)
+                continue
 
-        slots.sort(key=lambda item: item[0])
-        return [slot for _, slot in slots]
+            start_dt = self._slot_start_dt(slot.slot_date, slot.start_time)
+            if start_dt > now_dt:
+                slots.append(slot)
+
+        return slots
 
     def get_all_slots_for_date(self, slot_date: str) -> list[Slot]:
         normalized_date = self._normalize_date_str(slot_date)
@@ -365,18 +374,11 @@ class Database:
                 SELECT *
                 FROM slots
                 WHERE slot_date=? AND is_active=1
+                ORDER BY start_time
                 """,
                 (normalized_date,),
             ).fetchall()
-
-        slots: list[tuple[datetime, Slot]] = []
-        for row in rows:
-            slot = Slot(**dict(row))
-            start_dt, _ = self._build_range_datetimes(slot.slot_date, slot.start_time, slot.end_time)
-            slots.append((start_dt, slot))
-
-        slots.sort(key=lambda item: item[0])
-        return [slot for _, slot in slots]
+            return [Slot(**dict(r)) for r in rows]
 
     def get_slot(self, slot_id: int) -> Slot | None:
         with self._lock:
@@ -530,19 +532,19 @@ class Database:
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.client_user_id=?
                   AND b.status='confirmed'
+                ORDER BY s.slot_date, s.start_time
                 """,
                 (client_user_id,),
             ).fetchall()
 
-        bookings: list[tuple[datetime, Booking]] = []
+        bookings: list[Booking] = []
         for row in rows:
             booking = Booking(**dict(row))
-            start_dt, end_dt = self._build_range_datetimes(booking.slot_date, booking.start_time, booking.end_time)
-            if end_dt > now_dt:
-                bookings.append((start_dt, booking))
+            start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
+            if start_dt > now_dt:
+                bookings.append(booking)
 
-        bookings.sort(key=lambda item: item[0])
-        return [booking for _, booking in bookings]
+        return bookings
 
     def get_all_upcoming_bookings(self, now_date: str, now_time: str) -> list[Booking]:
         now_dt = self._compose_now_dt(now_date, now_time)
@@ -558,18 +560,18 @@ class Database:
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.status='confirmed'
+                ORDER BY s.slot_date, s.start_time
                 """
             ).fetchall()
 
-        bookings: list[tuple[datetime, Booking]] = []
+        bookings: list[Booking] = []
         for row in rows:
             booking = Booking(**dict(row))
-            start_dt, end_dt = self._build_range_datetimes(booking.slot_date, booking.start_time, booking.end_time)
-            if end_dt > now_dt:
-                bookings.append((start_dt, booking))
+            start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
+            if start_dt > now_dt:
+                bookings.append(booking)
 
-        bookings.sort(key=lambda item: item[0])
-        return [booking for _, booking in bookings]
+        return bookings
 
     def cancel_booking(self, booking_id: int, by_user_id: int | None = None) -> tuple[bool, str]:
         with self._lock, self.conn:
@@ -609,6 +611,7 @@ class Database:
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.status='confirmed'
+                ORDER BY s.slot_date, s.start_time
                 """
             ).fetchall()
 
@@ -616,7 +619,8 @@ class Database:
 
         for row in rows:
             booking = Booking(**dict(row))
-            start_dt, end_dt = self._build_range_datetimes(booking.slot_date, booking.start_time, booking.end_time)
+            start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
+            end_dt = self._slot_end_dt(booking.slot_date, booking.end_time)
 
             if booking.hour_reminder_sent == 0 and start_dt > now_dt and now_dt >= start_dt - timedelta(hours=1):
                 due.append({"kind": "hour", "booking": booking})
