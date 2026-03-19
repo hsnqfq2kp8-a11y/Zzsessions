@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, CallbackQuery, Update
 from telegram.constants import ChatType, ParseMode
@@ -53,9 +53,11 @@ def normalize_time_string(value: str) -> str:
     if ":" not in value:
         raise ValueError("Invalid time format")
     hour_part, minute_part = value.split(":", 1)
-    hour_part = hour_part.strip().zfill(2)
-    minute_part = minute_part.strip().zfill(2)
-    return f"{hour_part}:{minute_part}"
+    hour = int(hour_part.strip())
+    minute = int(minute_part.strip())
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("Invalid time range")
+    return f"{hour:02d}:{minute:02d}"
 
 
 def now_local() -> datetime:
@@ -82,64 +84,32 @@ def format_date_slash(slot_date: str) -> str:
     return f"{dt.year}/{dt.month}/{dt.day}"
 
 
-def _parse_hhmm(value: str) -> tuple[int, int]:
-    hour_str, minute_str = value.strip().split(":")
-    return int(hour_str), int(minute_str)
-
-
-def _map_session_hour(hour_value: int) -> int:
-    if 5 <= hour_value <= 11:
-        return hour_value + 12
-    if hour_value == 12:
-        return 0
-    return hour_value
-
-
-def build_actual_range(slot_date: str, start_time: str, end_time: str) -> tuple[datetime, datetime]:
-    base_date = date.fromisoformat(slot_date)
-
-    start_hour_raw, start_minute = _parse_hhmm(start_time)
-    end_hour_raw, end_minute = _parse_hhmm(end_time)
-
-    explicit_24h = start_hour_raw >= 13 or end_hour_raw >= 13
-
-    if explicit_24h:
-        start_hour_actual = start_hour_raw
-        end_hour_actual = end_hour_raw
-    else:
-        start_hour_actual = _map_session_hour(start_hour_raw)
-        end_hour_actual = _map_session_hour(end_hour_raw)
-
-    start_dt = datetime.combine(base_date, time(start_hour_actual, start_minute), tzinfo=SETTINGS.timezone)
-    end_dt = datetime.combine(base_date, time(end_hour_actual, end_minute), tzinfo=SETTINGS.timezone)
-
-    if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
-
-    return start_dt, end_dt
-
-
-def format_display_hour(dt: datetime) -> str:
-    hour_value = dt.hour % 12
-    if hour_value == 0:
-        hour_value = 12
-    return f"{hour_value}:{dt.minute:02d}"
+def format_display_time(value: str) -> str:
+    hh, mm = value.split(":")
+    return f"{int(hh)}:{mm}"
 
 
 def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
-    start_dt, end_dt = build_actual_range(slot_date, start_time, end_time)
-
-    mecca_range = f"{format_display_hour(start_dt)}-{format_display_hour(end_dt.astimezone(SETTINGS.timezone))}"
+    start_dt = datetime.combine(
+        date.fromisoformat(slot_date),
+        time.fromisoformat(start_time),
+        tzinfo=SETTINGS.timezone,
+    )
+    end_dt = datetime.combine(
+        date.fromisoformat(slot_date),
+        time.fromisoformat(end_time),
+        tzinfo=SETTINGS.timezone,
+    )
 
     lines = [
         f"اليوم : {format_date_slash(slot_date)}",
-        f"الساعة : {mecca_range} بتوقيت مكة المكرمة",
+        f"الساعة : {format_display_time(start_time)}-{format_display_time(end_time)} بتوقيت مكة المكرمة",
     ]
 
     if SETTINGS.secondary_timezone:
         alt_start = start_dt.astimezone(SETTINGS.secondary_timezone)
         alt_end = end_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_range = f"{format_display_hour(alt_start)}-{format_display_hour(alt_end)}"
+        alt_range = f"{alt_start.hour}:{alt_start.minute:02d}-{alt_end.hour}:{alt_end.minute:02d}"
         lines.append(f"و {alt_range} بتوقيت المغرب العربي")
 
     return "\n".join(lines)
@@ -352,9 +322,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not results["valid"]:
             await update.effective_message.reply_text(
                 "لم أتمكن من قراءة الأوقات. أرسلها بهذه الصيغة:\n"
-                "7:30-8:30\n"
                 "9:00-10:00\n"
-                "١١:٠٠-١٢:٠٠"
+                "13:00-14:00\n"
+                "00:00-01:00\n"
+                "٢١:٠٠-٢٢:٠٠"
             )
             return
 
@@ -427,7 +398,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if mode == "manager_add":
             context.user_data["state"] = "manager_await_slots_input"
             context.user_data["manager_selected_date"] = iso_date
-            await query.edit_message_text(f"اليوم المختار: {iso_date}\n\n{texts.ASK_MANAGER_SLOTS}")
+            await query.edit_message_text(
+                f"اليوم المختار: {format_date_slash(iso_date)}\n\n{texts.ASK_MANAGER_SLOTS}"
+            )
             return
 
         if mode == "manager_remove_slot":
@@ -438,7 +411,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             success, reason, count = DB.remove_day(iso_date)
             if success:
                 await query.edit_message_text(
-                    f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {iso_date}\nعدد الأوقات المحذوفة: {count}"
+                    f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {format_date_slash(iso_date)}\nعدد الأوقات المحذوفة: {count}"
                 )
             elif reason == "booked":
                 await query.edit_message_text(texts.MANAGER_REMOVE_DAY_BLOCKED)
@@ -504,9 +477,9 @@ async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
         await query.edit_message_text(texts.NO_SLOTS)
         return
 
-    button_data = [(slot.id, f"{slot.start_time}-{slot.end_time}") for slot in slots]
+    button_data = [(slot.id, f"{format_display_time(slot.start_time)}-{format_display_time(slot.end_time)}") for slot in slots]
     await query.edit_message_text(
-        f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {iso_date}",
+        f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
         reply_markup=slots_keyboard(button_data),
     )
 
@@ -769,8 +742,10 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
         return
 
     await query.edit_message_text(
-        f"اختر الوقت الذي تريد حذفه من يوم {iso_date}:",
-        reply_markup=manager_slots_remove_keyboard([(slot.id, f"{slot.start_time}-{slot.end_time}") for slot in slots]),
+        f"اختر الوقت الذي تريد حذفه من يوم {format_date_slash(iso_date)}:",
+        reply_markup=manager_slots_remove_keyboard(
+            [(slot.id, f"{format_display_time(slot.start_time)}-{format_display_time(slot.end_time)}") for slot in slots]
+        ),
     )
 
 
@@ -793,18 +768,17 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
         try:
             start_norm = normalize_time_string(start_raw)
             end_norm = normalize_time_string(end_raw)
-            time.fromisoformat(start_norm)
-            time.fromisoformat(end_norm)
+            start_time_obj = time.fromisoformat(start_norm)
+            end_time_obj = time.fromisoformat(end_norm)
         except ValueError:
             valid = False
             continue
 
-        result = DB.upsert_slot(
-            slot_date,
-            start_norm,
-            end_norm,
-            created_by,
-        )
+        if end_time_obj <= start_time_obj:
+            valid = False
+            continue
+
+        result = DB.upsert_slot(slot_date, start_norm, end_norm, created_by)
         if result == "created":
             created += 1
         elif result == "reactivated":
