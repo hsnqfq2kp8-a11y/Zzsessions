@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
+import unicodedata
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -44,28 +46,135 @@ SETTINGS: Settings = load_settings()
 DB = Database(SETTINGS.db_path)
 HOUR_ONLY_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{1,2}))?\s*$")
 ARABIC_TO_ENGLISH_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+ARABIC_NORMALIZE_MAP = str.maketrans({
+    "أ": "ا",
+    "إ": "ا",
+    "آ": "ا",
+    "ٱ": "ا",
+    "ة": "ه",
+    "ى": "ي",
+    "ؤ": "و",
+    "ئ": "ي",
+})
 
-COUNTRY_OPTIONS = {
-    "SA": ("السعودية", "Asia/Riyadh"),
-    "KW": ("الكويت", "Asia/Kuwait"),
-    "AE": ("الإمارات", "Asia/Dubai"),
-    "QA": ("قطر", "Asia/Qatar"),
-    "BH": ("البحرين", "Asia/Bahrain"),
-    "OM": ("عمان", "Asia/Muscat"),
-    "IQ": ("العراق", "Asia/Baghdad"),
-    "JO": ("الأردن", "Asia/Amman"),
-    "LB": ("لبنان", "Asia/Beirut"),
-    "PS": ("فلسطين", "Asia/Hebron"),
-    "EG": ("مصر", "Africa/Cairo"),
-    "LY": ("ليبيا", "Africa/Tripoli"),
-    "TN": ("تونس", "Africa/Tunis"),
-    "DZ": ("الجزائر", "Africa/Algiers"),
-    "MA": ("المغرب العربي", "Africa/Casablanca"),
+POPULAR_COUNTRIES = [
+    ("SA", "السعودية"),
+    ("MA", "المغرب"),
+    ("DZ", "الجزائر"),
+    ("JO", "الأردن"),
+    ("EG", "مصر"),
+    ("KW", "الكويت"),
+    ("OM", "عمان"),
+    ("LB", "لبنان"),
+    ("PS", "فلسطين"),
+    ("AE", "الإمارات"),
+    ("BH", "البحرين"),
+    ("TN", "تونس"),
+    ("LY", "ليبيا"),
+    ("QA", "قطر"),
+]
+
+COUNTRY_DATA = {
+    "SA": ("السعودية", "Asia/Riyadh", ["السعودية", "سعودية", "ksa", "saudi", "saudiarabia", "السعوديه"]),
+    "MA": ("المغرب", "Africa/Casablanca", ["المغرب", "مغرب", "morocco", "maroc"]),
+    "DZ": ("الجزائر", "Africa/Algiers", ["الجزائر", "جزائر", "algeria", "algerie"]),
+    "JO": ("الأردن", "Asia/Amman", ["الأردن", "الاردن", "اردن", "jordan"]),
+    "EG": ("مصر", "Africa/Cairo", ["مصر", "جمهوريةمصر", "egypt", "misr"]),
+    "KW": ("الكويت", "Asia/Kuwait", ["الكويت", "كويت", "kuwait"]),
+    "OM": ("عمان", "Asia/Muscat", ["عمان", "سلطنةعمان", "oman"]),
+    "LB": ("لبنان", "Asia/Beirut", ["لبنان", "lebanon"]),
+    "PS": ("فلسطين", "Asia/Hebron", ["فلسطين", "palestine"]),
+    "AE": ("الإمارات", "Asia/Dubai", ["الإمارات", "الامارات", "امارات", "uae", "emirates"]),
+    "BH": ("البحرين", "Asia/Bahrain", ["البحرين", "بحرين", "bahrain"]),
+    "TN": ("تونس", "Africa/Tunis", ["تونس", "tunisia"]),
+    "LY": ("ليبيا", "Africa/Tripoli", ["ليبيا", "ليبيه", "libya"]),
+    "QA": ("قطر", "Asia/Qatar", ["قطر", "qatar"]),
+    "IQ": ("العراق", "Asia/Baghdad", ["العراق", "العراقي", "iraq"]),
+    "SY": ("سوريا", "Asia/Damascus", ["سوريا", "سورية", "syria"]),
+    "YE": ("اليمن", "Asia/Aden", ["اليمن", "yemen"]),
+    "SD": ("السودان", "Africa/Khartoum", ["السودان", "sudan"]),
+    "MR": ("موريتانيا", "Africa/Nouakchott", ["موريتانيا", "mauritania"]),
+    "SO": ("الصومال", "Africa/Mogadishu", ["الصومال", "somalia"]),
+    "DJ": ("جيبوتي", "Africa/Djibouti", ["جيبوتي", "djibouti"]),
+    "KM": ("جزر القمر", "Indian/Comoro", ["جزرالقمر", "جزر القمر", "comoros"]),
+    "TR": ("تركيا", "Europe/Istanbul", ["تركيا", "turkey"]),
+    "IR": ("إيران", "Asia/Tehran", ["ايران", "إيران", "iran"]),
+    "FR": ("فرنسا", "Europe/Paris", ["فرنسا", "france"]),
+    "DE": ("ألمانيا", "Europe/Berlin", ["المانيا", "ألمانيا", "germany"]),
+    "GB": ("بريطانيا", "Europe/London", ["بريطانيا", "المملكةالمتحده", "المملكة المتحدة", "uk", "britain", "england"]),
+    "ES": ("إسبانيا", "Europe/Madrid", ["اسبانيا", "إسبانيا", "spain"]),
+    "IT": ("إيطاليا", "Europe/Rome", ["ايطاليا", "إيطاليا", "italy"]),
+    "BE": ("بلجيكا", "Europe/Brussels", ["بلجيكا", "belgium"]),
+    "NL": ("هولندا", "Europe/Amsterdam", ["هولندا", "netherlands", "holland"]),
+    "CH": ("سويسرا", "Europe/Zurich", ["سويسرا", "switzerland"]),
+    "AT": ("النمسا", "Europe/Vienna", ["النمسا", "austria"]),
+    "GR": ("اليونان", "Europe/Athens", ["اليونان", "greece"]),
+    "CY": ("قبرص", "Asia/Nicosia", ["قبرص", "cyprus"]),
+    "US": ("الولايات المتحدة", "America/New_York", ["الولاياتالمتحده", "الولايات المتحدة", "امريكا", "أمريكا", "usa", "unitedstates", "us"]),
+    "CA": ("كندا", "America/Toronto", ["كندا", "canada"]),
+    "MX": ("المكسيك", "America/Mexico_City", ["المكسيك", "mexico"]),
+    "BR": ("البرازيل", "America/Sao_Paulo", ["البرازيل", "brazil"]),
+    "AR": ("الأرجنتين", "America/Argentina/Buenos_Aires", ["الارجنتين", "الأرجنتين", "argentina"]),
+    "CL": ("تشيلي", "America/Santiago", ["تشيلي", "chile"]),
+    "IN": ("الهند", "Asia/Kolkata", ["الهند", "india"]),
+    "PK": ("باكستان", "Asia/Karachi", ["باكستان", "pakistan"]),
+    "BD": ("بنغلاديش", "Asia/Dhaka", ["بنغلاديش", "bangladesh"]),
+    "MY": ("ماليزيا", "Asia/Kuala_Lumpur", ["ماليزيا", "malaysia"]),
+    "SG": ("سنغافورة", "Asia/Singapore", ["سنغافوره", "سنغافورة", "singapore"]),
+    "ID": ("إندونيسيا", "Asia/Jakarta", ["اندونيسيا", "إندونيسيا", "indonesia"]),
+    "JP": ("اليابان", "Asia/Tokyo", ["اليابان", "japan"]),
+    "CN": ("الصين", "Asia/Shanghai", ["الصين", "china"]),
+    "KR": ("كوريا الجنوبية", "Asia/Seoul", ["كورياالجنوبية", "كوريا الجنوبية", "southkorea", "korea"]),
+    "AU": ("أستراليا", "Australia/Sydney", ["استراليا", "أستراليا", "australia"]),
+    "NZ": ("نيوزيلندا", "Pacific/Auckland", ["نيوزيلندا", "newzealand"]),
+    "ZA": ("جنوب أفريقيا", "Africa/Johannesburg", ["جنوبافريقيا", "جنوب أفريقيا", "southafrica"]),
+    "NG": ("نيجيريا", "Africa/Lagos", ["نيجيريا", "nigeria"]),
+    "KE": ("كينيا", "Africa/Nairobi", ["كينيا", "kenya"]),
 }
+
+COUNTRY_INDEX: dict[str, tuple[str, str]] = {}
 
 
 def normalize_digits(value: str) -> str:
     return value.translate(ARABIC_TO_ENGLISH_DIGITS)
+
+
+def normalize_country_text(value: str) -> str:
+    value = normalize_digits(value).strip().lower()
+    value = "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
+    value = value.translate(ARABIC_NORMALIZE_MAP)
+    value = re.sub(r"[\s\-_]+", "", value)
+    return value
+
+
+def build_country_index() -> None:
+    for code, (country_name, timezone_name, aliases) in COUNTRY_DATA.items():
+        for alias in aliases:
+            norm = normalize_country_text(alias)
+            if norm:
+                COUNTRY_INDEX[norm] = (country_name, timezone_name)
+                if norm.startswith("ال") and len(norm) > 2:
+                    COUNTRY_INDEX[norm[2:]] = (country_name, timezone_name)
+                else:
+                    COUNTRY_INDEX["ال" + norm] = (country_name, timezone_name)
+
+
+build_country_index()
+
+
+def resolve_country_text(user_text: str) -> tuple[str, str] | None:
+    norm = normalize_country_text(user_text)
+    if not norm:
+        return None
+
+    if norm in COUNTRY_INDEX:
+        return COUNTRY_INDEX[norm]
+
+    candidates = difflib.get_close_matches(norm, list(COUNTRY_INDEX.keys()), n=1, cutoff=0.72)
+    if candidates:
+        return COUNTRY_INDEX[candidates[0]]
+
+    return None
 
 
 def normalize_hour_input(value: str) -> str:
@@ -103,6 +212,7 @@ def clear_booking_flow(user_data: dict) -> None:
     user_data.pop("state", None)
     user_data.pop("booking_draft", None)
     user_data.pop("manager_selected_date", None)
+    user_data.pop("country_pending_date", None)
 
 
 def format_date_slash(slot_date: str) -> str:
@@ -236,8 +346,19 @@ async def send_main_menu(message, text: str | None = None) -> None:
     await message.reply_text(text or texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
 
+async def show_country_picker(target, pending_date: str | None = None) -> None:
+    items = [(code, label) for code, label in POPULAR_COUNTRIES]
+    markup = country_keyboard(items, pending_date=pending_date)
+
+    if isinstance(target, CallbackQuery):
+        await target.edit_message_text(texts.ASK_COUNTRY_PICKER, reply_markup=markup)
+    else:
+        await target.reply_text(texts.ASK_COUNTRY_PICKER, reply_markup=markup)
+
+
 async def show_client_calendar_message(target, month_year: tuple[int, int] | None = None) -> None:
     now = now_local()
+
     if month_year is None:
         first_available = DB.get_first_available_month(now.date().isoformat(), now.strftime("%H:%M"))
         year, month = first_available or (now.year, now.month)
@@ -279,6 +400,38 @@ async def show_manager_calendar_message(query: CallbackQuery, mode: str, year: i
     )
 
 
+async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
+    now = now_local()
+    slots = DB.get_available_slots(iso_date, now.date().isoformat(), now.strftime("%H:%M"))
+    if not slots:
+        await query.edit_message_text(texts.NO_SLOTS)
+        return
+
+    viewer_tz, _ = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
+    selected_date = date.fromisoformat(iso_date)
+    button_data: list[tuple[int, str]] = []
+
+    for slot in slots:
+        start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
+        local_start = start_dt.astimezone(viewer_tz)
+        button_data.append((slot.id, format_hhmm(local_start)))
+
+    await query.edit_message_text(
+        f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
+        reply_markup=slots_keyboard(button_data, selected_date.year, selected_date.month, iso_date),
+    )
+
+
+async def maybe_show_country_then_slots(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, iso_date: str) -> None:
+    profile = DB.get_user_profile(query.from_user.id if query.from_user else 0)
+    if profile:
+        await show_slots_for_day(query, iso_date)
+        return
+
+    context.user_data["country_pending_date"] = iso_date
+    await show_country_picker(query, pending_date=iso_date)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_private(update):
         await update.effective_message.reply_text(texts.ONLY_PRIVATE)
@@ -294,6 +447,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(texts.HELP_TEXT, reply_markup=main_menu_keyboard())
 
 
+async def country_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_private(update):
+        await update.effective_message.reply_text(texts.ONLY_PRIVATE)
+        return
+    context.user_data.pop("country_pending_date", None)
+    context.user_data["state"] = None
+    await show_country_picker(update.effective_message)
+
+
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_private(update):
         await update.effective_message.reply_text(texts.ONLY_PRIVATE)
@@ -306,15 +468,10 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     tz_label = get_user_timezone_and_label(user.id)[1]
     await update.effective_message.reply_text(
-        f"{texts.PANEL_HEADER}\n\nمعرّفك الحالي: <code>{user.id}</code>\nالدولة الحالية: {tz_label}",
+        f"{texts.PANEL_HEADER}\n\nمعرّفك الحالي: <code>{user.id}</code>\nبلد العرض الحالي: {tz_label}\nلتغييره استخدم /country",
         parse_mode=ParseMode.HTML,
         reply_markup=panel_keyboard(DB.is_booking_open()),
     )
-
-
-async def show_country_picker(message) -> None:
-    items = [(code, name) for code, (name, _) in COUNTRY_OPTIONS.items()]
-    await message.reply_text("اختر دولتك:", reply_markup=country_keyboard(items))
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -325,6 +482,44 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = (update.effective_message.text or "").strip()
     user_data = context.user_data
     state = user_data.get("state")
+
+    if state == "await_country_text":
+        resolved = resolve_country_text(text)
+        if not resolved:
+            await update.effective_message.reply_text(texts.COUNTRY_NOT_FOUND)
+            return
+
+        country_name, timezone_name = resolved
+        DB.set_user_profile(update.effective_user.id, country_name, timezone_name)
+        user_data.pop("state", None)
+
+        pending_date = user_data.pop("country_pending_date", None)
+        await update.effective_message.reply_text(f"{texts.COUNTRY_SAVED}\n{country_name}")
+
+        if pending_date:
+            now = now_local()
+            slots = DB.get_available_slots(pending_date, now.date().isoformat(), now.strftime("%H:%M"))
+            if not slots:
+                await update.effective_message.reply_text(texts.NO_SLOTS)
+                await send_main_menu(update.effective_message)
+                return
+
+            viewer_tz, _ = get_user_timezone_and_label(update.effective_user.id)
+            selected_date = date.fromisoformat(pending_date)
+            button_data: list[tuple[int, str]] = []
+            for slot in slots:
+                start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
+                local_start = start_dt.astimezone(viewer_tz)
+                button_data.append((slot.id, format_hhmm(local_start)))
+
+            await update.effective_message.reply_text(
+                f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(pending_date)}",
+                reply_markup=slots_keyboard(button_data, selected_date.year, selected_date.month, pending_date),
+            )
+            return
+
+        await send_main_menu(update.effective_message)
+        return
 
     if state == "await_name":
         if not text:
@@ -410,10 +605,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.effective_message.reply_text(texts.COORDINATORS_TEXT, reply_markup=main_menu_keyboard())
         return
 
-    if text == "اختيار الدولة":
-        await show_country_picker(update.effective_message)
-        return
-
     await update.effective_message.reply_text(texts.UNKNOWN_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -433,15 +624,38 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
         return
 
+    if data.startswith("country_open:"):
+        iso_date = data.split(":", 1)[1]
+        context.user_data["country_pending_date"] = iso_date
+        await show_country_picker(query, pending_date=iso_date)
+        return
+
     if data.startswith("set_country:"):
         code = data.split(":", 1)[1]
-        selected = COUNTRY_OPTIONS.get(code)
+
+        if code == "OTHER":
+            context.user_data["state"] = "await_country_text"
+            await query.edit_message_text(texts.ASK_COUNTRY_TEXT)
+            return
+
+        selected = COUNTRY_DATA.get(code)
         if not selected:
             await query.edit_message_text(texts.GENERIC_ERROR)
             return
-        country_name, timezone_name = selected
+
+        country_name, timezone_name, _ = selected
         DB.set_user_profile(query.from_user.id, country_name, timezone_name)
-        await query.edit_message_text(f"تم حفظ دولتك بنجاح: {country_name}")
+
+        pending_date = context.user_data.pop("country_pending_date", None)
+        context.user_data.pop("state", None)
+
+        if pending_date:
+            await query.edit_message_text(f"{texts.COUNTRY_SAVED}\n{country_name}")
+            await query.message.reply_text("جاري عرض الساعات حسب توقيتك...")
+            await maybe_show_country_then_slots(query, context, pending_date)
+            return
+
+        await query.edit_message_text(f"{texts.COUNTRY_SAVED}\n{country_name}")
         await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
         return
 
@@ -457,7 +671,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _, mode, iso_date = data.split(":", 2)
 
         if mode == "client":
-            await show_slots_for_day(query, iso_date)
+            await maybe_show_country_then_slots(query, context, iso_date)
             return
 
         if mode == "manager_add":
@@ -533,28 +747,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         booking_id = int(data.split(":", 1)[1])
         await manager_cancel_booking(query, context, booking_id)
         return
-
-
-async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
-    now = now_local()
-    slots = DB.get_available_slots(iso_date, now.date().isoformat(), now.strftime("%H:%M"))
-    if not slots:
-        await query.edit_message_text(texts.NO_SLOTS)
-        return
-
-    viewer_tz, _ = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
-    selected_date = date.fromisoformat(iso_date)
-    button_data: list[tuple[int, str]] = []
-
-    for slot in slots:
-        start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
-        local_start = start_dt.astimezone(viewer_tz)
-        button_data.append((slot.id, format_hhmm(local_start)))
-
-    await query.edit_message_text(
-        f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
-        reply_markup=slots_keyboard(button_data, selected_date.year, selected_date.month),
-    )
 
 
 async def begin_booking_from_slot(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, slot_id: int) -> None:
@@ -846,14 +1038,20 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
     await query.edit_message_text(
         f"اختر الساعة التي تريد حذفها من يوم {format_date_slash(iso_date)}:",
         reply_markup=manager_slots_remove_keyboard(
-            [(slot.id, format_hhmm(datetime.combine(date.today(), time.fromisoformat(slot.start_time)))) for slot in slots]
+            [
+                (
+                    slot.id,
+                    format_hhmm(datetime.combine(date.today(), time.fromisoformat(slot.start_time)))
+                )
+                for slot in slots
+            ]
         ),
     )
 
 
 def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
     normalized_text = normalize_digits(text)
-    parts = [p.strip() for p in re.split(r"[\s,]+", normalized_text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"[\n,]+", normalized_text) if p.strip()]
     valid = True
     created = 0
     reactivated = 0
@@ -954,6 +1152,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("panel", panel_command))
+    app.add_handler(CommandHandler("country", country_command))
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_error_handler(error_handler)
