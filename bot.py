@@ -106,11 +106,10 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
         f"الساعة : {format_display_time(start_time)}-{format_display_time(end_time)} بتوقيت مكة المكرمة",
     ]
 
-    if SETTINGS.secondary_timezone:
-        alt_start = start_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_end = end_dt.astimezone(SETTINGS.secondary_timezone)
-        alt_range = f"{alt_start.hour}:{alt_start.minute:02d}-{alt_end.hour}:{alt_end.minute:02d}"
-        lines.append(f"و {alt_range} بتوقيت المغرب العربي")
+    alt_start = start_dt - timedelta(hours=2)
+    alt_end = end_dt - timedelta(hours=2)
+    alt_range = f"{alt_start.hour}:{alt_start.minute:02d}-{alt_end.hour}:{alt_end.minute:02d}"
+    lines.append(f"و {alt_range} بتوقيت المغرب العربي")
 
     return "\n".join(lines)
 
@@ -477,10 +476,11 @@ async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
         await query.edit_message_text(texts.NO_SLOTS)
         return
 
+    selected_date = date.fromisoformat(iso_date)
     button_data = [(slot.id, f"{format_display_time(slot.start_time)}-{format_display_time(slot.end_time)}") for slot in slots]
     await query.edit_message_text(
         f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
-        reply_markup=slots_keyboard(button_data),
+        reply_markup=slots_keyboard(button_data, selected_date.year, selected_date.month),
     )
 
 
@@ -806,7 +806,7 @@ async def reminder_loop(app: Application) -> None:
                 DB.mark_notification_sent(booking.id, kind)
         except Exception:
             logger.exception("Reminder loop error")
-        await asyncio.sleep(SETTINGS.check_interval_seconds)
+        await asyncio.sleep(SETTINGS.check_interval_SECONDS)
 
 
 async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
