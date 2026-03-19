@@ -86,12 +86,12 @@ def manager_bookings_remove_keyboard(booking_ids: list[int]) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
-def slots_keyboard(slot_buttons: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(label, callback_data=f"slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
-    rows.append([InlineKeyboardButton("رجوع للقائمة الرئيسية", callback_data="go:home")])
+    rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{year}:{month}")])
     return InlineKeyboardMarkup(rows)
 
 
