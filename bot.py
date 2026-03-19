@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, CallbackQuery, Update
 from telegram.constants import ChatType, ParseMode
@@ -106,6 +106,7 @@ def format_session_block(slot_date: str, start_time: str, end_time: str) -> str:
         f"الساعة : {format_display_time(start_time)}-{format_display_time(end_time)} بتوقيت مكة المكرمة",
     ]
 
+    # توقيت المغرب العربي ثابت: أقل بساعتين من توقيت مكة
     alt_start = start_dt - timedelta(hours=2)
     alt_end = end_dt - timedelta(hours=2)
     alt_range = f"{alt_start.hour}:{alt_start.minute:02d}-{alt_end.hour}:{alt_end.minute:02d}"
@@ -806,7 +807,7 @@ async def reminder_loop(app: Application) -> None:
                 DB.mark_notification_sent(booking.id, kind)
         except Exception:
             logger.exception("Reminder loop error")
-        await asyncio.sleep(SETTINGS.check_interval_SECONDS)
+        await asyncio.sleep(SETTINGS.check_interval_seconds)
 
 
 async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
