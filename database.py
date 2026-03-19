@@ -72,27 +72,25 @@ class Database:
         return f"{hour:02d}:{minute:02d}"
 
     def _slot_start_dt(self, slot_date: str, start_time: str) -> datetime:
-        normalized_date = self._normalize_date_str(slot_date)
-        normalized_time = self._normalize_time_str(start_time)
         return datetime.combine(
-            date.fromisoformat(normalized_date),
-            time.fromisoformat(normalized_time),
+            date.fromisoformat(self._normalize_date_str(slot_date)),
+            time.fromisoformat(self._normalize_time_str(start_time)),
         )
 
-    def _slot_end_dt(self, slot_date: str, end_time: str) -> datetime:
-        normalized_date = self._normalize_date_str(slot_date)
-        normalized_time = self._normalize_time_str(end_time)
-        return datetime.combine(
-            date.fromisoformat(normalized_date),
-            time.fromisoformat(normalized_time),
+    def _slot_end_dt(self, slot_date: str, start_time: str, end_time: str) -> datetime:
+        start_dt = self._slot_start_dt(slot_date, start_time)
+        end_dt = datetime.combine(
+            date.fromisoformat(self._normalize_date_str(slot_date)),
+            time.fromisoformat(self._normalize_time_str(end_time)),
         )
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        return end_dt
 
     def _compose_now_dt(self, now_date: str, now_time: str) -> datetime:
-        normalized_date = self._normalize_date_str(now_date)
-        normalized_time = self._normalize_time_str(now_time)
         return datetime.combine(
-            date.fromisoformat(normalized_date),
-            time.fromisoformat(normalized_time),
+            date.fromisoformat(self._normalize_date_str(now_date)),
+            time.fromisoformat(self._normalize_time_str(now_time)),
         )
 
     def init_db(self) -> None:
@@ -104,6 +102,13 @@ class Database:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    country_name TEXT NOT NULL,
+                    timezone_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS slots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     slot_date TEXT NOT NULL,
@@ -112,7 +117,7 @@ class Database:
                     is_active INTEGER NOT NULL DEFAULT 1,
                     created_by INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(slot_date, start_time, end_time)
+                    UNIQUE(slot_date, start_time)
                 );
 
                 CREATE TABLE IF NOT EXISTS bookings (
@@ -132,32 +137,21 @@ class Database:
                     FOREIGN KEY(slot_id) REFERENCES slots(id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_slots_date_active
-                ON slots(slot_date, is_active);
-
-                CREATE INDEX IF NOT EXISTS idx_bookings_slot_status
-                ON bookings(slot_id, status);
-
-                CREATE INDEX IF NOT EXISTS idx_bookings_user_status
-                ON bookings(client_user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_slots_date_active ON slots(slot_date, is_active);
+                CREATE INDEX IF NOT EXISTS idx_bookings_slot_status ON bookings(slot_id, status);
+                CREATE INDEX IF NOT EXISTS idx_bookings_user_status ON bookings(client_user_id, status);
                 """
             )
 
             cur = self.conn.execute("SELECT value FROM settings WHERE key='booking_open'")
             if cur.fetchone() is None:
-                self.conn.execute(
-                    "INSERT INTO settings(key, value) VALUES('booking_open', '1')"
-                )
+                self.conn.execute("INSERT INTO settings(key, value) VALUES('booking_open', '1')")
 
-            self._migrate_slot_dates_and_times()
+            self._migrate_slots()
 
-    def _migrate_slot_dates_and_times(self) -> None:
+    def _migrate_slots(self) -> None:
         rows = self.conn.execute(
-            """
-            SELECT id, slot_date, start_time, end_time
-            FROM slots
-            ORDER BY id
-            """
+            "SELECT id, slot_date, start_time, end_time FROM slots ORDER BY id"
         ).fetchall()
 
         for row in rows:
@@ -168,20 +162,12 @@ class Database:
             except ValueError:
                 continue
 
-            if (
-                new_date == row["slot_date"]
-                and new_start == row["start_time"]
-                and new_end == row["end_time"]
-            ):
+            if new_date == row["slot_date"] and new_start == row["start_time"] and new_end == row["end_time"]:
                 continue
 
             try:
                 self.conn.execute(
-                    """
-                    UPDATE slots
-                    SET slot_date=?, start_time=?, end_time=?
-                    WHERE id=?
-                    """,
+                    "UPDATE slots SET slot_date=?, start_time=?, end_time=? WHERE id=?",
                     (new_date, new_start, new_end, row["id"]),
                 )
             except sqlite3.IntegrityError:
@@ -189,23 +175,40 @@ class Database:
                     """
                     SELECT id
                     FROM slots
-                    WHERE slot_date=? AND start_time=? AND end_time=? AND id<>?
+                    WHERE slot_date=? AND start_time=? AND id<>?
                     ORDER BY id
                     LIMIT 1
                     """,
-                    (new_date, new_start, new_end, row["id"]),
+                    (new_date, new_start, row["id"]),
                 ).fetchone()
-
                 if canonical:
-                    canonical_id = canonical["id"]
                     self.conn.execute(
                         "UPDATE bookings SET slot_id=? WHERE slot_id=?",
-                        (canonical_id, row["id"]),
+                        (canonical["id"], row["id"]),
                     )
-                    self.conn.execute(
-                        "DELETE FROM slots WHERE id=?",
-                        (row["id"],),
-                    )
+                    self.conn.execute("DELETE FROM slots WHERE id=?", (row["id"],))
+
+    def set_user_profile(self, user_id: int, country_name: str, timezone_name: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO user_profiles(user_id, country_name, timezone_name, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    country_name=excluded.country_name,
+                    timezone_name=excluded.timezone_name,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, country_name, timezone_name),
+            )
+
+    def get_user_profile(self, user_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT user_id, country_name, timezone_name, updated_at FROM user_profiles WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def set_booking_open(self, is_open: bool) -> None:
         with self._lock, self.conn:
@@ -216,9 +219,7 @@ class Database:
 
     def is_booking_open(self) -> bool:
         with self._lock:
-            row = self.conn.execute(
-                "SELECT value FROM settings WHERE key='booking_open'"
-            ).fetchone()
+            row = self.conn.execute("SELECT value FROM settings WHERE key='booking_open'").fetchone()
             return (row["value"] if row else "1") == "1"
 
     def upsert_slot(self, slot_date: str, start_time: str, end_time: str, created_by: int) -> str:
@@ -228,12 +229,8 @@ class Database:
 
         with self._lock, self.conn:
             existing = self.conn.execute(
-                """
-                SELECT id, is_active
-                FROM slots
-                WHERE slot_date=? AND start_time=? AND end_time=?
-                """,
-                (normalized_date, normalized_start, normalized_end),
+                "SELECT id, is_active FROM slots WHERE slot_date=? AND start_time=?",
+                (normalized_date, normalized_start),
             ).fetchone()
 
             if existing is None:
@@ -250,10 +247,10 @@ class Database:
                 self.conn.execute(
                     """
                     UPDATE slots
-                    SET is_active=1, created_by=?, created_at=CURRENT_TIMESTAMP
+                    SET end_time=?, is_active=1, created_by=?, created_at=CURRENT_TIMESTAMP
                     WHERE id=?
                     """,
-                    (created_by, existing["id"]),
+                    (normalized_end, created_by, existing["id"]),
                 )
                 return "reactivated"
 
@@ -269,8 +266,7 @@ class Database:
                 FROM slots s
                 WHERE s.is_active=1
                   AND NOT EXISTS (
-                      SELECT 1
-                      FROM bookings b
+                      SELECT 1 FROM bookings b
                       WHERE b.slot_id=s.id AND b.status='confirmed'
                   )
                 """
@@ -299,8 +295,7 @@ class Database:
                 WHERE s.is_active=1
                   AND SUBSTR(s.slot_date, 1, 7)=?
                   AND NOT EXISTS (
-                      SELECT 1
-                      FROM bookings b
+                      SELECT 1 FROM bookings b
                       WHERE b.slot_id=s.id AND b.status='confirmed'
                   )
                 """,
@@ -317,7 +312,6 @@ class Database:
 
     def get_manager_dates_for_month(self, year: int, month: int, now_date: str) -> set[int]:
         normalized_now_date = self._normalize_date_str(now_date)
-
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -340,11 +334,9 @@ class Database:
                 """
                 SELECT s.*
                 FROM slots s
-                WHERE s.slot_date=?
-                  AND s.is_active=1
+                WHERE s.slot_date=? AND s.is_active=1
                   AND NOT EXISTS (
-                      SELECT 1
-                      FROM bookings b
+                      SELECT 1 FROM bookings b
                       WHERE b.slot_id=s.id AND b.status='confirmed'
                   )
                 ORDER BY s.start_time
@@ -355,69 +347,42 @@ class Database:
         slots: list[Slot] = []
         for row in rows:
             slot = Slot(**dict(row))
-            if now_dt is None:
+            if now_dt is None or self._slot_start_dt(slot.slot_date, slot.start_time) > now_dt:
                 slots.append(slot)
-                continue
-
-            start_dt = self._slot_start_dt(slot.slot_date, slot.start_time)
-            if start_dt > now_dt:
-                slots.append(slot)
-
         return slots
 
     def get_all_slots_for_date(self, slot_date: str) -> list[Slot]:
         normalized_date = self._normalize_date_str(slot_date)
-
         with self._lock:
             rows = self.conn.execute(
-                """
-                SELECT *
-                FROM slots
-                WHERE slot_date=? AND is_active=1
-                ORDER BY start_time
-                """,
+                "SELECT * FROM slots WHERE slot_date=? AND is_active=1 ORDER BY start_time",
                 (normalized_date,),
             ).fetchall()
             return [Slot(**dict(r)) for r in rows]
 
     def get_slot(self, slot_id: int) -> Slot | None:
         with self._lock:
-            row = self.conn.execute(
-                "SELECT * FROM slots WHERE id=?",
-                (slot_id,),
-            ).fetchone()
+            row = self.conn.execute("SELECT * FROM slots WHERE id=?", (slot_id,)).fetchone()
             return Slot(**dict(row)) if row else None
 
     def remove_slot(self, slot_id: int) -> tuple[bool, str]:
         with self._lock, self.conn:
-            row = self.conn.execute(
-                "SELECT * FROM slots WHERE id=?",
-                (slot_id,),
-            ).fetchone()
+            row = self.conn.execute("SELECT * FROM slots WHERE id=?", (slot_id,)).fetchone()
             if not row:
                 return False, "not_found"
 
             active_booking = self.conn.execute(
-                """
-                SELECT 1
-                FROM bookings
-                WHERE slot_id=? AND status='confirmed'
-                """,
+                "SELECT 1 FROM bookings WHERE slot_id=? AND status='confirmed'",
                 (slot_id,),
             ).fetchone()
-
             if active_booking:
                 return False, "booked"
 
-            self.conn.execute(
-                "UPDATE slots SET is_active=0 WHERE id=?",
-                (slot_id,),
-            )
+            self.conn.execute("UPDATE slots SET is_active=0 WHERE id=?", (slot_id,))
             return True, "removed"
 
     def remove_day(self, slot_date: str) -> tuple[bool, str, int]:
         normalized_date = self._normalize_date_str(slot_date)
-
         with self._lock, self.conn:
             active_booking = self.conn.execute(
                 """
@@ -434,11 +399,7 @@ class Database:
                 return False, "booked", 0
 
             cur = self.conn.execute(
-                """
-                UPDATE slots
-                SET is_active=0
-                WHERE slot_date=? AND is_active=1
-                """,
+                "UPDATE slots SET is_active=0 WHERE slot_date=? AND is_active=1",
                 (normalized_date,),
             )
             return True, "removed", cur.rowcount
@@ -454,39 +415,24 @@ class Database:
     ) -> tuple[bool, int | None]:
         with self._lock, self.conn:
             slot = self.conn.execute(
-                """
-                SELECT *
-                FROM slots
-                WHERE id=? AND is_active=1
-                """,
+                "SELECT * FROM slots WHERE id=? AND is_active=1",
                 (slot_id,),
             ).fetchone()
-
             if slot is None:
                 return False, None
 
             existing = self.conn.execute(
-                """
-                SELECT 1
-                FROM bookings
-                WHERE slot_id=? AND status='confirmed'
-                """,
+                "SELECT 1 FROM bookings WHERE slot_id=? AND status='confirmed'",
                 (slot_id,),
             ).fetchone()
-
             if existing:
                 return False, None
 
             cur = self.conn.execute(
                 """
                 INSERT INTO bookings(
-                    slot_id,
-                    client_user_id,
-                    client_chat_id,
-                    client_name,
-                    client_telegram,
-                    session_type,
-                    status
+                    slot_id, client_user_id, client_chat_id, client_name,
+                    client_telegram, session_type, status
                 ) VALUES (?, ?, ?, ?, ?, ?, 'confirmed')
                 """,
                 (
@@ -504,11 +450,7 @@ class Database:
         with self._lock:
             row = self.conn.execute(
                 """
-                SELECT
-                    b.*,
-                    s.slot_date,
-                    s.start_time,
-                    s.end_time
+                SELECT b.*, s.slot_date, s.start_time, s.end_time
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.id=?
@@ -519,19 +461,13 @@ class Database:
 
     def get_user_upcoming_bookings(self, client_user_id: int, now_date: str, now_time: str) -> list[Booking]:
         now_dt = self._compose_now_dt(now_date, now_time)
-
         with self._lock:
             rows = self.conn.execute(
                 """
-                SELECT
-                    b.*,
-                    s.slot_date,
-                    s.start_time,
-                    s.end_time
+                SELECT b.*, s.slot_date, s.start_time, s.end_time
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
-                WHERE b.client_user_id=?
-                  AND b.status='confirmed'
+                WHERE b.client_user_id=? AND b.status='confirmed'
                 ORDER BY s.slot_date, s.start_time
                 """,
                 (client_user_id,),
@@ -540,23 +476,16 @@ class Database:
         bookings: list[Booking] = []
         for row in rows:
             booking = Booking(**dict(row))
-            start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
-            if start_dt > now_dt:
+            if self._slot_start_dt(booking.slot_date, booking.start_time) > now_dt:
                 bookings.append(booking)
-
         return bookings
 
     def get_all_upcoming_bookings(self, now_date: str, now_time: str) -> list[Booking]:
         now_dt = self._compose_now_dt(now_date, now_time)
-
         with self._lock:
             rows = self.conn.execute(
                 """
-                SELECT
-                    b.*,
-                    s.slot_date,
-                    s.start_time,
-                    s.end_time
+                SELECT b.*, s.slot_date, s.start_time, s.end_time
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.status='confirmed'
@@ -567,34 +496,23 @@ class Database:
         bookings: list[Booking] = []
         for row in rows:
             booking = Booking(**dict(row))
-            start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
-            if start_dt > now_dt:
+            if self._slot_start_dt(booking.slot_date, booking.start_time) > now_dt:
                 bookings.append(booking)
-
         return bookings
 
     def cancel_booking(self, booking_id: int, by_user_id: int | None = None) -> tuple[bool, str]:
         with self._lock, self.conn:
-            booking = self.conn.execute(
-                "SELECT * FROM bookings WHERE id=?",
-                (booking_id,),
-            ).fetchone()
+            booking = self.conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
 
             if booking is None:
                 return False, "not_found"
-
             if booking["status"] != "confirmed":
                 return False, "already_cancelled"
-
             if by_user_id is not None and int(booking["client_user_id"]) != int(by_user_id):
                 return False, "forbidden"
 
             self.conn.execute(
-                """
-                UPDATE bookings
-                SET status='cancelled', cancelled_at=CURRENT_TIMESTAMP
-                WHERE id=?
-                """,
+                "UPDATE bookings SET status='cancelled', cancelled_at=CURRENT_TIMESTAMP WHERE id=?",
                 (booking_id,),
             )
             return True, "cancelled"
@@ -603,11 +521,7 @@ class Database:
         with self._lock:
             rows = self.conn.execute(
                 """
-                SELECT
-                    b.*,
-                    s.slot_date,
-                    s.start_time,
-                    s.end_time
+                SELECT b.*, s.slot_date, s.start_time, s.end_time
                 FROM bookings b
                 JOIN slots s ON s.id=b.slot_id
                 WHERE b.status='confirmed'
@@ -616,11 +530,10 @@ class Database:
             ).fetchall()
 
         due: list[dict[str, Any]] = []
-
         for row in rows:
             booking = Booking(**dict(row))
             start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
-            end_dt = self._slot_end_dt(booking.slot_date, booking.end_time)
+            end_dt = self._slot_end_dt(booking.slot_date, booking.start_time, booking.end_time)
 
             if booking.hour_reminder_sent == 0 and start_dt > now_dt and now_dt >= start_dt - timedelta(hours=1):
                 due.append({"kind": "hour", "booking": booking})
@@ -638,7 +551,4 @@ class Database:
         }[kind]
 
         with self._lock, self.conn:
-            self.conn.execute(
-                f"UPDATE bookings SET {column}=1 WHERE id=?",
-                (booking_id,),
-            )
+            self.conn.execute(f"UPDATE bookings SET {column}=1 WHERE id=?", (booking_id,))
