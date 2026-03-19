@@ -130,6 +130,27 @@ def country_keyboard(items: list[tuple[str, str]], pending_date: str | None = No
     return InlineKeyboardMarkup(rows)
 
 
+def offers_sections_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("الجلسات النفسية", callback_data="offers:psychological")],
+            [InlineKeyboardButton("الإختبارات السلوكية", callback_data="offers:behavioral_tests")],
+            [InlineKeyboardButton("الدورات التعليمية", callback_data="offers:courses")],
+            [InlineKeyboardButton("حصص الكوتشينق", callback_data="offers:coaching")],
+            [InlineKeyboardButton("الرئيسية", callback_data="go:home")],
+        ]
+    )
+
+
+def offers_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("العودة إلى أقسام العروض", callback_data="offers:menu")],
+            [InlineKeyboardButton("الرئيسية", callback_data="go:home")],
+        ]
+    )
+
+
 def calendar_keyboard(
     year: int,
     month: int,
