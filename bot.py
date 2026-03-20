@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 SETTINGS: Settings = load_settings()
 DB = Database(SETTINGS.db_path)
+
 HOUR_ONLY_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{1,2}))?\s*$")
 ARABIC_TO_ENGLISH_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 ARABIC_NORMALIZE_MAP = str.maketrans({
@@ -152,7 +153,7 @@ def normalize_country_text(value: str) -> str:
 
 
 def build_country_index() -> None:
-    for code, (country_name, timezone_name, aliases) in COUNTRY_DATA.items():
+    for _, (country_name, timezone_name, aliases) in COUNTRY_DATA.items():
         for alias in aliases:
             norm = normalize_country_text(alias)
             if norm:
@@ -346,37 +347,34 @@ def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_labe
     return f"{title}\n\n{details}"
 
 
-def format_offer_row(name: str, price: str, width: int) -> str:
-    spaces = max(2, width - len(name) - len(price))
-    return f"\u200E{price}\u200E{' ' * spaces}\u200F{name}\u200F"
+def format_offer_item(name: str, price: str) -> str:
+    wrapped_lines = textwrap.wrap(
+        name,
+        width=34,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    if not wrapped_lines:
+        wrapped_lines = [name]
+
+    escaped_lines = [html.escape(line) for line in wrapped_lines]
+    first_line = f"• {escaped_lines[0]}"
+    other_lines = escaped_lines[1:]
+
+    body_lines = [first_line] + other_lines
+    body = "\n".join(body_lines)
+
+    return f"{body}\n<b>السعر:</b> {html.escape(price)}"
 
 
 def format_offer_section_message(section_key: str) -> str:
     title, items = texts.OFFERS_SECTIONS[section_key]
-    chunks: list[str] = [f"<b>{html.escape(title)} :</b>"]
-
-    row_buffer: list[str] = []
+    blocks = [f"<b>{html.escape(title)} :</b>"]
 
     for name, price in items:
-        short_enough = len(name) <= 28
-        if short_enough:
-            row_buffer.append(format_offer_row(name, price, 42))
-            continue
+        blocks.append(format_offer_item(name, price))
 
-        if row_buffer:
-            chunks.append(f"<pre>{html.escape(chr(10).join(row_buffer))}</pre>")
-            row_buffer = []
-
-        wrapped_name = "\n".join(
-            html.escape(line)
-            for line in textwrap.wrap(name, width=34, break_long_words=False, break_on_hyphens=False)
-        )
-        chunks.append(f"• {wrapped_name}\n<b>السعر:</b> {html.escape(price)}")
-
-    if row_buffer:
-        chunks.append(f"<pre>{html.escape(chr(10).join(row_buffer))}</pre>")
-
-    return "\n\n".join(chunks)
+    return "\n\n".join(blocks)
 
 
 async def send_offers_menu_message(message) -> None:
