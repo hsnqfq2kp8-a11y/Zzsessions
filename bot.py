@@ -347,6 +347,25 @@ def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_labe
     return f"{title}\n\n{details}"
 
 
+def confirmation_text_for_recipient(booking: Booking, recipient_user_id: int | None) -> str:
+    viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
+    return booking_confirmation_text(booking, viewer_tz, viewer_label)
+
+
+def cancellation_text_for_recipient(booking: Booking, recipient_user_id: int | None) -> str:
+    viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
+    return booking_cancellation_text(booking, viewer_tz, viewer_label)
+
+
+def reminder_text_for_recipient(
+    booking: Booking,
+    recipient_user_id: int | None,
+    title: str,
+) -> str:
+    viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
+    return reminder_text(booking, title, viewer_tz, viewer_label)
+
+
 def format_offer_item(name: str, price: str) -> str:
     wrapped_lines = textwrap.wrap(
         name,
@@ -876,19 +895,14 @@ async def finalize_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(texts.GENERIC_ERROR)
         return
 
-    client_tz, client_label = get_user_timezone_and_label(user.id)
-    confirmation = booking_confirmation_text(booking, client_tz, client_label)
-
+    confirmation = confirmation_text_for_recipient(booking, user.id)
     await query.edit_message_text(confirmation)
     await query.message.reply_text("تم حفظ الموعد في سجلك.", reply_markup=main_menu_keyboard())
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
-            await context.bot.send_message(
-                chat_id=manager_id,
-                text=booking_confirmation_text(booking, manager_tz, manager_label),
-            )
+            manager_text = confirmation_text_for_recipient(booking, manager_id)
+            await context.bot.send_message(chat_id=manager_id, text=manager_text)
         except Exception:
             logger.exception("Failed to notify manager %s about new booking", manager_id)
 
@@ -967,18 +981,14 @@ async def confirm_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
-    client_tz, client_label = get_user_timezone_and_label(user.id)
-    cancellation = booking_cancellation_text(booking, client_tz, client_label)
+    cancellation = cancellation_text_for_recipient(booking, user.id)
     await query.edit_message_text(cancellation)
     await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
-            await context.bot.send_message(
-                chat_id=manager_id,
-                text=booking_cancellation_text(booking, manager_tz, manager_label),
-            )
+            manager_text = cancellation_text_for_recipient(booking, manager_id)
+            await context.bot.send_message(chat_id=manager_id, text=manager_text)
         except Exception:
             logger.exception("Failed to notify manager %s about cancellation", manager_id)
 
@@ -998,15 +1008,14 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
-    manager_tz, manager_label = get_user_timezone_and_label(query.from_user.id)
-    cancellation = booking_cancellation_text(booking, manager_tz, manager_label)
-    await query.edit_message_text(cancellation)
+    manager_text = cancellation_text_for_recipient(booking, query.from_user.id)
+    await query.edit_message_text(manager_text)
 
     try:
-        client_tz, client_label = get_user_timezone_and_label(booking.client_user_id)
+        client_text = cancellation_text_for_recipient(booking, booking.client_user_id)
         await context.bot.send_message(
             chat_id=booking.client_chat_id,
-            text=booking_cancellation_text(booking, client_tz, client_label),
+            text=client_text,
         )
     except Exception:
         logger.exception("Failed to notify client about manager cancellation")
@@ -1015,10 +1024,10 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         if manager_id == query.from_user.id:
             continue
         try:
-            other_tz, other_label = get_user_timezone_and_label(manager_id)
+            other_manager_text = cancellation_text_for_recipient(booking, manager_id)
             await context.bot.send_message(
                 chat_id=manager_id,
-                text=booking_cancellation_text(booking, other_tz, other_label),
+                text=other_manager_text,
             )
         except Exception:
             logger.exception("Failed to notify manager %s about manager cancellation", manager_id)
@@ -1180,20 +1189,20 @@ async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
         return
 
     try:
-        client_tz, client_label = get_user_timezone_and_label(booking.client_user_id)
+        client_text = reminder_text_for_recipient(booking, booking.client_user_id, client_title)
         await app.bot.send_message(
             chat_id=booking.client_chat_id,
-            text=reminder_text(booking, client_title, client_tz, client_label),
+            text=client_text,
         )
     except Exception:
         logger.exception("Failed to send reminder to client %s", booking.client_chat_id)
 
     for manager_id in SETTINGS.manager_ids:
         try:
-            manager_tz, manager_label = get_user_timezone_and_label(manager_id)
+            manager_text = reminder_text_for_recipient(booking, manager_id, manager_title)
             await app.bot.send_message(
                 chat_id=manager_id,
-                text=reminder_text(booking, manager_title, manager_tz, manager_label),
+                text=manager_text,
             )
         except Exception:
             logger.exception("Failed to send reminder to manager %s", manager_id)
