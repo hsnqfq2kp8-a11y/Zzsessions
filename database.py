@@ -93,6 +93,9 @@ class Database:
             time.fromisoformat(self._normalize_time_str(now_time)),
         )
 
+    def _min_bookable_dt(self, now_date: str, now_time: str) -> datetime:
+        return self._compose_now_dt(now_date, now_time) + timedelta(days=1)
+
     def init_db(self) -> None:
         with self._lock, self.conn:
             self.conn.executescript(
@@ -257,7 +260,7 @@ class Database:
             return "exists"
 
     def get_first_available_month(self, now_date: str, now_time: str) -> tuple[int, int] | None:
-        now_dt = self._compose_now_dt(now_date, now_time)
+        min_dt = self._min_bookable_dt(now_date, now_time)
 
         with self._lock:
             rows = self.conn.execute(
@@ -275,7 +278,7 @@ class Database:
         candidates: list[datetime] = []
         for row in rows:
             start_dt = self._slot_start_dt(row["slot_date"], row["start_time"])
-            if start_dt > now_dt:
+            if start_dt >= min_dt:
                 candidates.append(start_dt)
 
         if not candidates:
@@ -285,7 +288,7 @@ class Database:
         return first_dt.year, first_dt.month
 
     def get_available_dates_for_month(self, year: int, month: int, now_date: str, now_time: str) -> set[int]:
-        now_dt = self._compose_now_dt(now_date, now_time)
+        min_dt = self._min_bookable_dt(now_date, now_time)
 
         with self._lock:
             rows = self.conn.execute(
@@ -305,7 +308,7 @@ class Database:
         available_days: set[int] = set()
         for row in rows:
             start_dt = self._slot_start_dt(row["slot_date"], row["start_time"])
-            if start_dt > now_dt:
+            if start_dt >= min_dt:
                 available_days.add(int(row["slot_date"][8:10]))
 
         return available_days
@@ -327,7 +330,7 @@ class Database:
 
     def get_available_slots(self, slot_date: str, now_date: str | None = None, now_time: str | None = None) -> list[Slot]:
         normalized_date = self._normalize_date_str(slot_date)
-        now_dt = self._compose_now_dt(now_date, now_time) if now_date and now_time else None
+        min_dt = self._min_bookable_dt(now_date, now_time) if now_date and now_time else None
 
         with self._lock:
             rows = self.conn.execute(
@@ -347,7 +350,7 @@ class Database:
         slots: list[Slot] = []
         for row in rows:
             slot = Slot(**dict(row))
-            if now_dt is None or self._slot_start_dt(slot.slot_date, slot.start_time) > now_dt:
+            if min_dt is None or self._slot_start_dt(slot.slot_date, slot.start_time) >= min_dt:
                 slots.append(slot)
         return slots
 
@@ -534,6 +537,9 @@ class Database:
             booking = Booking(**dict(row))
             start_dt = self._slot_start_dt(booking.slot_date, booking.start_time)
             end_dt = self._slot_end_dt(booking.slot_date, booking.start_time, booking.end_time)
+
+            if booking.day_reminder_sent == 0 and start_dt > now_dt and now_dt >= start_dt - timedelta(days=1):
+                due.append({"kind": "day", "booking": booking})
 
             if booking.hour_reminder_sent == 0 and start_dt > now_dt and now_dt >= start_dt - timedelta(hours=1):
                 due.append({"kind": "hour", "booking": booking})
