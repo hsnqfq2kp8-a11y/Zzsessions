@@ -1167,7 +1167,10 @@ async def reminder_loop(app: Application) -> None:
 
 
 async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
-    if kind == "hour":
+    if kind == "day":
+        client_title = "بكرا موعدك"
+        manager_title = "بكرا موعد الجلسة"
+    elif kind == "hour":
         client_title = "جلستك بعد ساعة"
         manager_title = "الجلسة بعد ساعة"
     elif kind == "start":
