@@ -355,6 +355,12 @@ def booking_tag_for(booking: Booking) -> str | None:
     return None
 
 
+def booking_selector_label(booking: Booking, viewer_tz: ZoneInfo) -> str:
+    start_dt, _ = get_slot_datetimes(booking.slot_date, booking.start_time, booking.end_time)
+    local_start = start_dt.astimezone(viewer_tz)
+    return f"إلغاء {arabic_day_name(local_start.date())} {local_start.month}/{local_start.day} - {format_time_arabic(local_start)}"
+
+
 def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     details = format_booking_details(
         draft["slot_date"],
@@ -1070,7 +1076,7 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
     viewer_tz, viewer_label = get_user_timezone_and_label(user.id)
     header = "هذه مواعيدك القادمة:" if not cancel_mode else "اختر الحجز الذي تريد إلغاءه:"
     lines = [header, ""]
-    booking_ids: list[int] = []
+    button_items: list[tuple[int, str]] = []
 
     for booking in bookings:
         lines.append(
@@ -1083,13 +1089,14 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
                 booking.session_type,
                 viewer_tz,
                 viewer_label,
-                booking_tag=booking_tag_for(booking),
+                booking_tag=None if cancel_mode else booking_tag_for(booking),
             )
         )
         lines.append("")
-        booking_ids.append(booking.id)
+        if cancel_mode:
+            button_items.append((booking.id, booking_selector_label(booking, viewer_tz)))
 
-    reply_markup = bookings_list_keyboard(booking_ids) if cancel_mode else None
+    reply_markup = bookings_list_keyboard(button_items) if cancel_mode else None
     await update.effective_message.reply_text("\n".join(lines).strip(), reply_markup=reply_markup)
 
 
@@ -1114,7 +1121,7 @@ async def prompt_cancel_booking(query: CallbackQuery, context: ContextTypes.DEFA
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking_tag=booking_tag_for(booking),
+        booking_tag=None,
     )
     await query.edit_message_text(f"{details}\n\n{texts.ASK_CANCEL_REASON}")
 
