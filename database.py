@@ -146,16 +146,12 @@ class Database:
                     day_reminder_sent INTEGER NOT NULL DEFAULT 0,
                     hour_reminder_sent INTEGER NOT NULL DEFAULT 0,
                     start_notice_sent INTEGER NOT NULL DEFAULT 0,
-                    admin_day TEXT,
-                    daily_sequence INTEGER,
-                    cancellation_reason TEXT,
                     FOREIGN KEY(slot_id) REFERENCES slots(id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_slots_date_active ON slots(slot_date, is_active);
                 CREATE INDEX IF NOT EXISTS idx_bookings_slot_status ON bookings(slot_id, status);
                 CREATE INDEX IF NOT EXISTS idx_bookings_user_status ON bookings(client_user_id, status);
-                CREATE INDEX IF NOT EXISTS idx_bookings_admin_day_seq ON bookings(admin_day, daily_sequence);
                 """
             )
 
@@ -165,6 +161,12 @@ class Database:
 
             self._migrate_slots()
             self._migrate_bookings()
+            self._ensure_post_migration_indexes()
+
+    def _ensure_post_migration_indexes(self) -> None:
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bookings_admin_day_seq ON bookings(admin_day, daily_sequence)"
+        )
 
     def _migrate_slots(self) -> None:
         rows = self.conn.execute(
@@ -227,12 +229,19 @@ class Database:
             """
         ).fetchall()
 
-        sequences: dict[str, int] = {}
+        current_max_by_day: dict[str, int] = {}
         for row in rows:
             admin_day = row["admin_day"] or self._admin_day_for_slot(row["slot_date"], row["start_time"])
-            next_seq = sequences.get(admin_day, 0) + 1
-            sequences[admin_day] = max(next_seq, row["daily_sequence"] or 0, next_seq)
-            daily_sequence = row["daily_sequence"] or next_seq
+            existing_seq = row["daily_sequence"]
+
+            if existing_seq is None:
+                next_seq = current_max_by_day.get(admin_day, 0) + 1
+                daily_sequence = next_seq
+            else:
+                daily_sequence = int(existing_seq)
+
+            current_max_by_day[admin_day] = max(current_max_by_day.get(admin_day, 0), daily_sequence)
+
             self.conn.execute(
                 "UPDATE bookings SET admin_day=?, daily_sequence=? WHERE id=?",
                 (admin_day, daily_sequence, row["id"]),
