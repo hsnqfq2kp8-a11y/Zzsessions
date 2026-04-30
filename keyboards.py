@@ -27,7 +27,6 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("عرض المواعيد المتاحة")],
-            [KeyboardButton("العروض")],
             [KeyboardButton("مواعيدي")],
             [KeyboardButton("إلغاء حجز")],
             [KeyboardButton("تواصل مع المنسقات")],
@@ -55,15 +54,6 @@ def booking_summary_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("تأكيد الحجز", callback_data="book:confirm")],
             [InlineKeyboardButton("إلغاء العملية", callback_data="book:cancel")],
-        ]
-    )
-
-
-def cancel_booking_keyboard(booking_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("نعم، إلغاء الحجز", callback_data=f"booking_cancel_confirm:{booking_id}")],
-            [InlineKeyboardButton("لا، رجوع", callback_data="booking_cancel_abort")],
         ]
     )
 
