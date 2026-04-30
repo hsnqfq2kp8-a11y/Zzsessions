@@ -58,10 +58,10 @@ def booking_summary_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def bookings_list_keyboard(booking_ids: list[int]) -> InlineKeyboardMarkup:
+def bookings_list_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(f"إلغاء الحجز #{booking_id}", callback_data=f"booking_cancel:{booking_id}")]
-        for booking_id in booking_ids
+        [InlineKeyboardButton(label, callback_data=f"booking_cancel:{booking_id}")]
+        for booking_id, label in items
     ]
     if not rows:
         rows = [[InlineKeyboardButton("رجوع", callback_data="noop")]]
