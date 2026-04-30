@@ -34,6 +34,9 @@ class Booking:
     day_reminder_sent: int
     hour_reminder_sent: int
     start_notice_sent: int
+    admin_day: str | None
+    daily_sequence: int | None
+    cancellation_reason: str | None
     slot_date: str
     start_time: str
     end_time: str
@@ -96,6 +99,12 @@ class Database:
     def _min_bookable_dt(self, now_date: str, now_time: str) -> datetime:
         return self._compose_now_dt(now_date, now_time) + timedelta(days=1)
 
+    def _admin_day_for_slot(self, slot_date: str, start_time: str) -> str:
+        start_dt = self._slot_start_dt(slot_date, start_time)
+        if start_dt.time() < time(4, 0):
+            return (start_dt.date() - timedelta(days=1)).isoformat()
+        return start_dt.date().isoformat()
+
     def init_db(self) -> None:
         with self._lock, self.conn:
             self.conn.executescript(
@@ -137,12 +146,16 @@ class Database:
                     day_reminder_sent INTEGER NOT NULL DEFAULT 0,
                     hour_reminder_sent INTEGER NOT NULL DEFAULT 0,
                     start_notice_sent INTEGER NOT NULL DEFAULT 0,
+                    admin_day TEXT,
+                    daily_sequence INTEGER,
+                    cancellation_reason TEXT,
                     FOREIGN KEY(slot_id) REFERENCES slots(id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_slots_date_active ON slots(slot_date, is_active);
                 CREATE INDEX IF NOT EXISTS idx_bookings_slot_status ON bookings(slot_id, status);
                 CREATE INDEX IF NOT EXISTS idx_bookings_user_status ON bookings(client_user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_bookings_admin_day_seq ON bookings(admin_day, daily_sequence);
                 """
             )
 
@@ -151,6 +164,7 @@ class Database:
                 self.conn.execute("INSERT INTO settings(key, value) VALUES('booking_open', '1')")
 
             self._migrate_slots()
+            self._migrate_bookings()
 
     def _migrate_slots(self) -> None:
         rows = self.conn.execute(
@@ -190,6 +204,39 @@ class Database:
                         (canonical["id"], row["id"]),
                     )
                     self.conn.execute("DELETE FROM slots WHERE id=?", (row["id"],))
+
+    def _migrate_bookings(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(bookings)").fetchall()
+        }
+
+        if "admin_day" not in columns:
+            self.conn.execute("ALTER TABLE bookings ADD COLUMN admin_day TEXT")
+        if "daily_sequence" not in columns:
+            self.conn.execute("ALTER TABLE bookings ADD COLUMN daily_sequence INTEGER")
+        if "cancellation_reason" not in columns:
+            self.conn.execute("ALTER TABLE bookings ADD COLUMN cancellation_reason TEXT")
+
+        rows = self.conn.execute(
+            """
+            SELECT b.id, b.created_at, b.admin_day, b.daily_sequence, s.slot_date, s.start_time
+            FROM bookings b
+            JOIN slots s ON s.id=b.slot_id
+            ORDER BY b.created_at, b.id
+            """
+        ).fetchall()
+
+        sequences: dict[str, int] = {}
+        for row in rows:
+            admin_day = row["admin_day"] or self._admin_day_for_slot(row["slot_date"], row["start_time"])
+            next_seq = sequences.get(admin_day, 0) + 1
+            sequences[admin_day] = max(next_seq, row["daily_sequence"] or 0, next_seq)
+            daily_sequence = row["daily_sequence"] or next_seq
+            self.conn.execute(
+                "UPDATE bookings SET admin_day=?, daily_sequence=? WHERE id=?",
+                (admin_day, daily_sequence, row["id"]),
+            )
 
     def set_user_profile(self, user_id: int, country_name: str, timezone_name: str) -> None:
         with self._lock, self.conn:
@@ -431,12 +478,19 @@ class Database:
             if existing:
                 return False, None
 
+            admin_day = self._admin_day_for_slot(slot["slot_date"], slot["start_time"])
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(daily_sequence), 0) AS max_seq FROM bookings WHERE admin_day=?",
+                (admin_day,),
+            ).fetchone()
+            daily_sequence = int(row["max_seq"] or 0) + 1
+
             cur = self.conn.execute(
                 """
                 INSERT INTO bookings(
                     slot_id, client_user_id, client_chat_id, client_name,
-                    client_telegram, session_type, status
-                ) VALUES (?, ?, ?, ?, ?, ?, 'confirmed')
+                    client_telegram, session_type, status, admin_day, daily_sequence
+                ) VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)
                 """,
                 (
                     slot_id,
@@ -445,6 +499,8 @@ class Database:
                     client_name,
                     client_telegram,
                     session_type,
+                    admin_day,
+                    daily_sequence,
                 ),
             )
             return True, int(cur.lastrowid)
@@ -503,7 +559,12 @@ class Database:
                 bookings.append(booking)
         return bookings
 
-    def cancel_booking(self, booking_id: int, by_user_id: int | None = None) -> tuple[bool, str]:
+    def cancel_booking(
+        self,
+        booking_id: int,
+        by_user_id: int | None = None,
+        cancellation_reason: str | None = None,
+    ) -> tuple[bool, str]:
         with self._lock, self.conn:
             booking = self.conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
 
@@ -515,8 +576,8 @@ class Database:
                 return False, "forbidden"
 
             self.conn.execute(
-                "UPDATE bookings SET status='cancelled', cancelled_at=CURRENT_TIMESTAMP WHERE id=?",
-                (booking_id,),
+                "UPDATE bookings SET status='cancelled', cancelled_at=CURRENT_TIMESTAMP, cancellation_reason=? WHERE id=?",
+                (cancellation_reason, booking_id),
             )
             return True, "cancelled"
 
