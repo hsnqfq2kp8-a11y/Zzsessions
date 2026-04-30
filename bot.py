@@ -7,6 +7,7 @@ import logging
 import re
 import textwrap
 import unicodedata
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -28,7 +29,6 @@ from keyboards import (
     booking_summary_keyboard,
     bookings_list_keyboard,
     calendar_keyboard,
-    cancel_booking_keyboard,
     country_keyboard,
     main_menu_keyboard,
     manager_bookings_remove_keyboard,
@@ -61,6 +61,15 @@ ARABIC_NORMALIZE_MAP = str.maketrans({
     "ؤ": "و",
     "ئ": "ي",
 })
+ARABIC_DAY_NAMES = [
+    "الاثنين",
+    "الثلاثاء",
+    "الأربعاء",
+    "الخميس",
+    "الجمعة",
+    "السبت",
+    "الأحد",
+]
 
 POPULAR_COUNTRIES = [
     ("SA", "السعودية"),
@@ -144,9 +153,13 @@ def normalize_digits(value: str) -> str:
     return value.translate(ARABIC_TO_ENGLISH_DIGITS)
 
 
+def strip_diacritics(value: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
+
+
 def normalize_country_text(value: str) -> str:
     value = normalize_digits(value).strip().lower()
-    value = "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
+    value = strip_diacritics(value)
     value = value.translate(ARABIC_NORMALIZE_MAP)
     value = re.sub(r"[\s\-_]+", "", value)
     return value
@@ -182,15 +195,49 @@ def resolve_country_text(user_text: str) -> tuple[str, str] | None:
     return None
 
 
+def _detect_meridiem(raw: str) -> tuple[str, str | None]:
+    value = normalize_digits(raw).strip().lower()
+    value = strip_diacritics(value).replace(".", "")
+    value = re.sub(r"\s+", " ", value).strip()
+
+    pm_tokens = ["مساءا", "مساء", " pm", "p m", "pm", "م"]
+    am_tokens = ["صباحا", "صباح", " am", "a m", "am", "ص"]
+
+    for token in pm_tokens:
+        if value.endswith(token):
+            return value[: -len(token)].strip(), "pm"
+
+    for token in am_tokens:
+        if value.endswith(token):
+            return value[: -len(token)].strip(), "am"
+
+    return value, None
+
+
 def normalize_hour_input(value: str) -> str:
-    value = normalize_digits(value).strip()
-    match = HOUR_ONLY_RE.match(value)
+    base, meridiem = _detect_meridiem(value)
+    match = HOUR_ONLY_RE.match(base)
     if not match:
         raise ValueError("Invalid hour format")
+
     hour = int(match.group(1))
     minute = int(match.group(2) or "0")
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+    if not (0 <= minute <= 59):
+        raise ValueError("Minute out of range")
+
+    if meridiem is None:
+        if not (0 <= hour <= 23):
+            raise ValueError("Hour out of range")
+        return f"{hour:02d}:{minute:02d}"
+
+    if not (1 <= hour <= 12):
         raise ValueError("Hour out of range")
+
+    if meridiem == "am":
+        hour = 0 if hour == 12 else hour
+    else:
+        hour = hour if hour == 12 else hour + 12
+
     return f"{hour:02d}:{minute:02d}"
 
 
@@ -218,6 +265,7 @@ def clear_booking_flow(user_data: dict) -> None:
     user_data.pop("booking_draft", None)
     user_data.pop("manager_selected_date", None)
     user_data.pop("country_pending_date", None)
+    user_data.pop("cancel_booking_id", None)
 
 
 def format_date_slash(slot_date: str) -> str:
@@ -225,8 +273,18 @@ def format_date_slash(slot_date: str) -> str:
     return f"{dt.year}/{dt.month}/{dt.day}"
 
 
-def format_hhmm(dt: datetime) -> str:
-    return f"{dt.hour}:{dt.minute:02d}"
+def arabic_day_name(d: date) -> str:
+    return ARABIC_DAY_NAMES[d.weekday()]
+
+
+def format_time_arabic(dt: datetime) -> str:
+    hour24 = dt.hour
+    minute = dt.minute
+    period = "صباحا" if hour24 < 12 else "مساءا"
+    hour12 = hour24 % 12 or 12
+    if minute == 0:
+        return f"{hour12} {period}"
+    return f"{hour12}:{minute:02d} {period}"
 
 
 def get_user_timezone_and_label(user_id: int | None) -> tuple[ZoneInfo, str]:
@@ -260,8 +318,8 @@ def format_session_block(slot_date: str, start_time: str, end_time: str, viewer_
     start_dt, _ = get_slot_datetimes(slot_date, start_time, end_time)
     local_start = start_dt.astimezone(viewer_tz)
     lines = [
-        f"اليوم : {local_start.year}/{local_start.month}/{local_start.day}",
-        f"الساعة : {format_hhmm(local_start)} بتوقيت {viewer_label}",
+        f"اليوم : {arabic_day_name(local_start.date())} {local_start.year}/{local_start.month}/{local_start.day}",
+        f"الساعة : {format_time_arabic(local_start)} بتوقيت {viewer_label}",
     ]
     return "\n".join(lines)
 
@@ -275,7 +333,8 @@ def format_booking_details(
     session_type: str,
     viewer_tz: ZoneInfo,
     viewer_label: str,
-    booking_id: int | None = None,
+    booking_tag: str | None = None,
+    cancellation_reason: str | None = None,
 ) -> str:
     lines = [
         f"الاسم : {client_name}",
@@ -283,9 +342,17 @@ def format_booking_details(
         f"نوع الجلسة : {session_type}",
         format_session_block(slot_date, start_time, end_time, viewer_tz, viewer_label),
     ]
-    if booking_id is not None:
-        lines.append(f"#{booking_id}")
+    if booking_tag:
+        lines.append(booking_tag)
+    if cancellation_reason:
+        lines.append(f"سبب الالغاء : {cancellation_reason}")
     return "\n".join(lines)
+
+
+def booking_tag_for(booking: Booking) -> str | None:
+    if booking.daily_sequence:
+        return f"#{booking.daily_sequence}"
+    return None
 
 
 def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) -> str:
@@ -312,12 +379,17 @@ def booking_confirmation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_labe
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking.id,
+        booking_tag=booking_tag_for(booking),
     )
     return f"تم حجز جلسة ✅\n\n{details}"
 
 
-def booking_cancellation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_label: str) -> str:
+def booking_cancellation_text(
+    booking: Booking,
+    viewer_tz: ZoneInfo,
+    viewer_label: str,
+    cancellation_reason: str | None = None,
+) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -327,7 +399,8 @@ def booking_cancellation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_labe
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking.id,
+        booking_tag=booking_tag_for(booking),
+        cancellation_reason=cancellation_reason or booking.cancellation_reason,
     )
     return f"تم إلغاء حجز\n\n{details}"
 
@@ -342,7 +415,7 @@ def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_labe
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking.id,
+        booking_tag=booking_tag_for(booking),
     )
     return f"{title}\n\n{details}"
 
@@ -352,9 +425,13 @@ def confirmation_text_for_recipient(booking: Booking, recipient_user_id: int | N
     return booking_confirmation_text(booking, viewer_tz, viewer_label)
 
 
-def cancellation_text_for_recipient(booking: Booking, recipient_user_id: int | None) -> str:
+def cancellation_text_for_recipient(
+    booking: Booking,
+    recipient_user_id: int | None,
+    cancellation_reason: str | None = None,
+) -> str:
     viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
-    return booking_cancellation_text(booking, viewer_tz, viewer_label)
+    return booking_cancellation_text(booking, viewer_tz, viewer_label, cancellation_reason=cancellation_reason)
 
 
 def reminder_text_for_recipient(
@@ -385,12 +462,17 @@ async def notify_managers_cancellation(
     context: ContextTypes.DEFAULT_TYPE,
     booking: Booking,
     exclude_user_id: int | None = None,
+    cancellation_reason: str | None = None,
 ) -> None:
     for manager_id in SETTINGS.manager_ids:
         if exclude_user_id is not None and manager_id == exclude_user_id:
             continue
         try:
-            manager_text = cancellation_text_for_recipient(booking, manager_id)
+            manager_text = cancellation_text_for_recipient(
+                booking,
+                manager_id,
+                cancellation_reason=cancellation_reason,
+            )
             await context.bot.send_message(chat_id=manager_id, text=manager_text)
         except Exception:
             logger.exception("Failed to notify manager %s about cancellation", manager_id)
@@ -533,7 +615,7 @@ async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
     for slot in slots:
         start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
         local_start = start_dt.astimezone(viewer_tz)
-        button_data.append((slot.id, format_hhmm(local_start)))
+        button_data.append((slot.id, format_time_arabic(local_start)))
 
     await query.edit_message_text(
         f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
@@ -629,7 +711,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             for slot in slots:
                 start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
                 local_start = start_dt.astimezone(viewer_tz)
-                button_data.append((slot.id, format_hhmm(local_start)))
+                button_data.append((slot.id, format_time_arabic(local_start)))
 
             await update.effective_message.reply_text(
                 f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(pending_date)}",
@@ -688,7 +770,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not results["valid"]:
             await update.effective_message.reply_text(
                 "لم أتمكن من قراءة الساعات. أرسلها بهذه الصيغة:\n"
-                "9\n9:00\n13:00\n00:00\n٢١:٠٠"
+                "18\n18:00\n6 م\n6 مساءا\n6 ص"
             )
             return
 
@@ -702,6 +784,39 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"معاد تفعيلها: {results['reactivated']}\n"
             f"موجودة مسبقًا: {results['exists']}",
             reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if state == "await_cancel_reason":
+        if not text:
+            await update.effective_message.reply_text(texts.ASK_CANCEL_REASON)
+            return
+
+        booking_id = user_data.get("cancel_booking_id")
+        user = update.effective_user
+        booking = DB.get_booking(booking_id) if booking_id else None
+
+        if not booking or booking.client_user_id != user.id or booking.status != "confirmed":
+            clear_booking_flow(user_data)
+            await update.effective_message.reply_text(texts.BOOKING_CANCEL_NOT_FOUND, reply_markup=main_menu_keyboard())
+            return
+
+        success, _ = DB.cancel_booking(booking_id, by_user_id=user.id, cancellation_reason=text)
+        if not success:
+            clear_booking_flow(user_data)
+            await update.effective_message.reply_text(texts.BOOKING_CANCEL_NOT_FOUND, reply_markup=main_menu_keyboard())
+            return
+
+        booking.cancellation_reason = text
+        cancellation = cancellation_text_for_recipient(booking, user.id, cancellation_reason=text)
+        clear_booking_flow(user_data)
+        await update.effective_message.reply_text(cancellation, reply_markup=main_menu_keyboard())
+
+        await notify_managers_cancellation(
+            context,
+            booking,
+            exclude_user_id=user.id if user.id in SETTINGS.manager_ids else None,
+            cancellation_reason=text,
         )
         return
 
@@ -864,18 +979,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(texts.GENERIC_ERROR)
         return
 
-    if data.startswith("booking_cancel:") and not data.startswith("booking_cancel_confirm:"):
+    if data.startswith("booking_cancel:"):
         booking_id = int(data.split(":", 1)[1])
-        await prompt_cancel_booking(query, booking_id)
-        return
-
-    if data.startswith("booking_cancel_confirm:"):
-        booking_id = int(data.split(":", 1)[1])
-        await confirm_cancel_booking(query, context, booking_id)
-        return
-
-    if data == "booking_cancel_abort":
-        await query.edit_message_text(texts.BOOKING_CANCEL_ABORTED)
+        await prompt_cancel_booking(query, context, booking_id)
         return
 
     if data.startswith("manager_cancel_booking:"):
@@ -977,7 +1083,7 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
                 booking.session_type,
                 viewer_tz,
                 viewer_label,
-                booking.id,
+                booking_tag=booking_tag_for(booking),
             )
         )
         lines.append("")
@@ -987,13 +1093,16 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
     await update.effective_message.reply_text("\n".join(lines).strip(), reply_markup=reply_markup)
 
 
-async def prompt_cancel_booking(query: CallbackQuery, booking_id: int) -> None:
+async def prompt_cancel_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, booking_id: int) -> None:
     booking = DB.get_booking(booking_id)
     user = query.from_user
 
     if not booking or booking.client_user_id != user.id or booking.status != "confirmed":
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
+
+    context.user_data["state"] = "await_cancel_reason"
+    context.user_data["cancel_booking_id"] = booking_id
 
     viewer_tz, viewer_label = get_user_timezone_and_label(user.id)
     details = format_booking_details(
@@ -1005,36 +1114,9 @@ async def prompt_cancel_booking(query: CallbackQuery, booking_id: int) -> None:
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking.id,
+        booking_tag=booking_tag_for(booking),
     )
-    await query.edit_message_text(
-        f"هل تريد إلغاء هذا الحجز؟\n\n{details}",
-        reply_markup=cancel_booking_keyboard(booking_id),
-    )
-
-
-async def confirm_cancel_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, booking_id: int) -> None:
-    booking = DB.get_booking(booking_id)
-    user = query.from_user
-
-    if not booking or booking.client_user_id != user.id or booking.status != "confirmed":
-        await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
-        return
-
-    success, _ = DB.cancel_booking(booking_id, by_user_id=user.id)
-    if not success:
-        await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
-        return
-
-    cancellation = cancellation_text_for_recipient(booking, user.id)
-    await query.edit_message_text(cancellation)
-    await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
-
-    await notify_managers_cancellation(
-        context,
-        booking,
-        exclude_user_id=user.id if user.id in SETTINGS.manager_ids else None,
-    )
+    await query.edit_message_text(f"{details}\n\n{texts.ASK_CANCEL_REASON}")
 
 
 async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, booking_id: int) -> None:
@@ -1057,10 +1139,7 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
 
     try:
         client_text = cancellation_text_for_recipient(booking, booking.client_user_id)
-        await context.bot.send_message(
-            chat_id=booking.client_chat_id,
-            text=client_text,
-        )
+        await context.bot.send_message(chat_id=booking.client_chat_id, text=client_text)
     except Exception:
         logger.exception("Failed to notify client about manager cancellation")
 
@@ -1069,6 +1148,30 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         booking,
         exclude_user_id=query.from_user.id,
     )
+
+
+def section_title_for_bookings(group_date: date, today_date: date) -> str:
+    if group_date == today_date:
+        return "حجوزات اليوم :"
+    return f"حجوزات {arabic_day_name(group_date)} :"
+
+
+def split_booking_sections(blocks: list[str], heading: str, limit: int = 3500) -> list[str]:
+    sections: list[str] = []
+    current = heading
+    first = True
+    for block in blocks:
+        candidate = (current + "\n\n" + block) if current else block
+        if len(candidate) > limit and current and current != heading:
+            sections.append(current)
+            current = heading + "\n\n" + block if first else block
+            first = False
+        else:
+            current = candidate
+            first = False
+    if current:
+        sections.append(current)
+    return sections
 
 
 async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
@@ -1109,33 +1212,32 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
             return
 
         viewer_tz, viewer_label = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
-        chunks: list[str] = []
-        current: list[str] = []
-
+        grouped: dict[date, list[Booking]] = defaultdict(list)
         for booking in bookings:
-            block = format_booking_details(
-                booking.slot_date,
-                booking.start_time,
-                booking.end_time,
-                booking.client_name,
-                booking.client_telegram,
-                booking.session_type,
-                viewer_tz,
-                viewer_label,
-                booking.id,
-            )
-            if len("\n\n".join(current + [block])) > 3500 and current:
-                chunks.append("\n\n".join(current))
-                current = [block]
-            else:
-                current.append(block)
+            grouped[date.fromisoformat(booking.slot_date)].append(booking)
 
-        if current:
-            chunks.append("\n\n".join(current))
+        sections_text: list[str] = []
+        for group_date in sorted(grouped.keys()):
+            heading = section_title_for_bookings(group_date, now.date())
+            blocks = [
+                format_booking_details(
+                    booking.slot_date,
+                    booking.start_time,
+                    booking.end_time,
+                    booking.client_name,
+                    booking.client_telegram,
+                    booking.session_type,
+                    viewer_tz,
+                    viewer_label,
+                    booking_tag=booking_tag_for(booking),
+                )
+                for booking in grouped[group_date]
+            ]
+            sections_text.extend(split_booking_sections(blocks, heading))
 
-        await query.edit_message_text(chunks[0])
-        for chunk in chunks[1:]:
-            await query.message.reply_text(chunk)
+        await query.edit_message_text(sections_text[0])
+        for section in sections_text[1:]:
+            await query.message.reply_text(section)
         return
 
     if action == "toggle":
@@ -1158,7 +1260,7 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
             [
                 (
                     slot.id,
-                    format_hhmm(datetime.combine(date.today(), time.fromisoformat(slot.start_time)))
+                    format_time_arabic(datetime.combine(date.today(), time.fromisoformat(slot.start_time))),
                 )
                 for slot in slots
             ]
@@ -1169,7 +1271,7 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
 def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
     normalized_text = normalize_digits(text)
     parts = [p.strip() for p in re.split(r"[\n,]+", normalized_text) if p.strip()]
-    valid = True
+    valid_count = 0
     created = 0
     reactivated = 0
     exists = 0
@@ -1178,8 +1280,8 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
         try:
             start_norm = normalize_hour_input(part)
             end_norm = add_one_hour(start_norm)
+            valid_count += 1
         except ValueError:
-            valid = False
             continue
 
         result = DB.upsert_slot(slot_date, start_norm, end_norm, created_by)
@@ -1191,7 +1293,7 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
             exists += 1
 
     return {
-        "valid": bool(parts) and valid,
+        "valid": valid_count > 0,
         "created": created,
         "reactivated": reactivated,
         "exists": exists,
@@ -1228,10 +1330,7 @@ async def send_reminder(app: Application, booking: Booking, kind: str) -> None:
 
     try:
         client_text = reminder_text_for_recipient(booking, booking.client_user_id, client_title)
-        await app.bot.send_message(
-            chat_id=booking.client_chat_id,
-            text=client_text,
-        )
+        await app.bot.send_message(chat_id=booking.client_chat_id, text=client_text)
     except Exception:
         logger.exception("Failed to send reminder to client %s", booking.client_chat_id)
 
