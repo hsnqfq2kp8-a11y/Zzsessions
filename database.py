@@ -440,28 +440,51 @@ class Database:
             self.conn.execute("UPDATE slots SET is_active=0 WHERE id=?", (slot_id,))
             return True, "removed"
 
-    def remove_day(self, slot_date: str) -> tuple[bool, str, int]:
+    def remove_day(self, slot_date: str) -> tuple[bool, str, int, int]:
         normalized_date = self._normalize_date_str(slot_date)
         with self._lock, self.conn:
-            active_booking = self.conn.execute(
+            rows = self.conn.execute(
                 """
-                SELECT 1
-                FROM bookings b
-                JOIN slots s ON s.id=b.slot_id
-                WHERE s.slot_date=? AND b.status='confirmed'
-                LIMIT 1
+                SELECT s.id,
+                       EXISTS(
+                           SELECT 1 FROM bookings b
+                           WHERE b.slot_id=s.id AND b.status='confirmed'
+                       ) AS has_booking
+                FROM slots s
+                WHERE s.slot_date=? AND s.is_active=1
                 """,
                 (normalized_date,),
-            ).fetchone()
+            ).fetchall()
 
-            if active_booking:
-                return False, "booked", 0
+            if not rows:
+                return False, "not_found", 0, 0
 
-            cur = self.conn.execute(
-                "UPDATE slots SET is_active=0 WHERE slot_date=? AND is_active=1",
-                (normalized_date,),
-            )
-            return True, "removed", cur.rowcount
+            booked_ids = [int(r["id"]) for r in rows if int(r["has_booking"]) == 1]
+            booked_count = len(booked_ids)
+
+            if booked_ids:
+                placeholders = ",".join(["?"] * len(booked_ids))
+                cur = self.conn.execute(
+                    f"""
+                    UPDATE slots
+                    SET is_active=0
+                    WHERE slot_date=? AND is_active=1 AND id NOT IN ({placeholders})
+                    """,
+                    [normalized_date, *booked_ids],
+                )
+            else:
+                cur = self.conn.execute(
+                    "UPDATE slots SET is_active=0 WHERE slot_date=? AND is_active=1",
+                    (normalized_date,),
+                )
+
+            deleted_count = cur.rowcount
+
+            if booked_count > 0 and deleted_count > 0:
+                return True, "partial", deleted_count, booked_count
+            if booked_count > 0 and deleted_count == 0:
+                return True, "booked_only", 0, booked_count
+            return True, "removed_all", deleted_count, 0
 
     def create_booking(
         self,
@@ -513,6 +536,37 @@ class Database:
                 ),
             )
             return True, int(cur.lastrowid)
+
+    def get_confirmed_day_time_sequence(self, booking_id: int) -> int | None:
+        with self._lock:
+            booking = self.conn.execute(
+                """
+                SELECT b.id, s.slot_date
+                FROM bookings b
+                JOIN slots s ON s.id=b.slot_id
+                WHERE b.id=? AND b.status='confirmed'
+                """,
+                (booking_id,),
+            ).fetchone()
+            if not booking:
+                return None
+
+            rows = self.conn.execute(
+                """
+                SELECT b.id
+                FROM bookings b
+                JOIN slots s ON s.id=b.slot_id
+                WHERE b.status='confirmed' AND s.slot_date=?
+                ORDER BY s.start_time, b.id
+                """,
+                (booking["slot_date"],),
+            ).fetchall()
+
+            for index, row in enumerate(rows, start=1):
+                if int(row["id"]) == int(booking_id):
+                    return index
+
+            return None
 
     def get_booking(self, booking_id: int) -> Booking | None:
         with self._lock:
