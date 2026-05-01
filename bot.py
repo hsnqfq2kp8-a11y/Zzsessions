@@ -314,6 +314,11 @@ def get_slot_datetimes(slot_date: str, start_time: str, end_time: str) -> tuple[
     return start_dt, end_dt
 
 
+def manager_booking_tag(booking: Booking) -> str | None:
+    seq = DB.get_confirmed_day_time_sequence(booking.id)
+    return f"#{seq}" if seq else None
+
+
 def format_session_block(slot_date: str, start_time: str, end_time: str, viewer_tz: ZoneInfo, viewer_label: str) -> str:
     start_dt, _ = get_slot_datetimes(slot_date, start_time, end_time)
     local_start = start_dt.astimezone(viewer_tz)
@@ -349,16 +354,10 @@ def format_booking_details(
     return "\n".join(lines)
 
 
-def booking_tag_for(booking: Booking) -> str | None:
-    if booking.daily_sequence:
-        return f"#{booking.daily_sequence}"
-    return None
-
-
-def booking_selector_label(booking: Booking, viewer_tz: ZoneInfo) -> str:
+def booking_selector_label(booking: Booking, viewer_tz: ZoneInfo, action_word: str) -> str:
     start_dt, _ = get_slot_datetimes(booking.slot_date, booking.start_time, booking.end_time)
     local_start = start_dt.astimezone(viewer_tz)
-    return f"إلغاء {arabic_day_name(local_start.date())} {local_start.month}/{local_start.day} - {format_time_arabic(local_start)}"
+    return f"{action_word} {arabic_day_name(local_start.date())} {local_start.month}/{local_start.day} - {format_time_arabic(local_start)}"
 
 
 def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) -> str:
@@ -375,7 +374,7 @@ def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) ->
     return f"{texts.BOOKING_SUMMARY_TITLE}\n\n{details}\n\nهل تريد تأكيد الحجز؟"
 
 
-def booking_confirmation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_label: str) -> str:
+def booking_confirmation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_label: str, booking_tag: str | None = None) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -385,7 +384,7 @@ def booking_confirmation_text(booking: Booking, viewer_tz: ZoneInfo, viewer_labe
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking_tag=booking_tag_for(booking),
+        booking_tag=booking_tag,
     )
     return f"تم حجز جلسة ✅\n\n{details}"
 
@@ -395,6 +394,7 @@ def booking_cancellation_text(
     viewer_tz: ZoneInfo,
     viewer_label: str,
     cancellation_reason: str | None = None,
+    booking_tag: str | None = None,
 ) -> str:
     details = format_booking_details(
         booking.slot_date,
@@ -405,13 +405,13 @@ def booking_cancellation_text(
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking_tag=booking_tag_for(booking),
+        booking_tag=booking_tag,
         cancellation_reason=cancellation_reason or booking.cancellation_reason,
     )
     return f"تم إلغاء حجز\n\n{details}"
 
 
-def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_label: str) -> str:
+def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_label: str, booking_tag: str | None = None) -> str:
     details = format_booking_details(
         booking.slot_date,
         booking.start_time,
@@ -421,23 +421,32 @@ def reminder_text(booking: Booking, title: str, viewer_tz: ZoneInfo, viewer_labe
         booking.session_type,
         viewer_tz,
         viewer_label,
-        booking_tag=booking_tag_for(booking),
+        booking_tag=booking_tag,
     )
     return f"{title}\n\n{details}"
 
 
 def confirmation_text_for_recipient(booking: Booking, recipient_user_id: int | None) -> str:
     viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
-    return booking_confirmation_text(booking, viewer_tz, viewer_label)
+    tag = manager_booking_tag(booking) if is_manager(recipient_user_id) else None
+    return booking_confirmation_text(booking, viewer_tz, viewer_label, booking_tag=tag)
 
 
 def cancellation_text_for_recipient(
     booking: Booking,
     recipient_user_id: int | None,
     cancellation_reason: str | None = None,
+    manager_tag: str | None = None,
 ) -> str:
     viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
-    return booking_cancellation_text(booking, viewer_tz, viewer_label, cancellation_reason=cancellation_reason)
+    tag = manager_tag if is_manager(recipient_user_id) else None
+    return booking_cancellation_text(
+        booking,
+        viewer_tz,
+        viewer_label,
+        cancellation_reason=cancellation_reason,
+        booking_tag=tag,
+    )
 
 
 def reminder_text_for_recipient(
@@ -446,7 +455,8 @@ def reminder_text_for_recipient(
     title: str,
 ) -> str:
     viewer_tz, viewer_label = get_user_timezone_and_label(recipient_user_id)
-    return reminder_text(booking, title, viewer_tz, viewer_label)
+    tag = manager_booking_tag(booking) if is_manager(recipient_user_id) else None
+    return reminder_text(booking, title, viewer_tz, viewer_label, booking_tag=tag)
 
 
 async def notify_managers_booking(
@@ -469,6 +479,7 @@ async def notify_managers_cancellation(
     booking: Booking,
     exclude_user_id: int | None = None,
     cancellation_reason: str | None = None,
+    manager_tag: str | None = None,
 ) -> None:
     for manager_id in SETTINGS.manager_ids:
         if exclude_user_id is not None and manager_id == exclude_user_id:
@@ -478,6 +489,7 @@ async def notify_managers_cancellation(
                 booking,
                 manager_id,
                 cancellation_reason=cancellation_reason,
+                manager_tag=manager_tag,
             )
             await context.bot.send_message(chat_id=manager_id, text=manager_text)
         except Exception:
@@ -807,6 +819,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.effective_message.reply_text(texts.BOOKING_CANCEL_NOT_FOUND, reply_markup=main_menu_keyboard())
             return
 
+        manager_tag = manager_booking_tag(booking)
+
         success, _ = DB.cancel_booking(booking_id, by_user_id=user.id, cancellation_reason=text)
         if not success:
             clear_booking_flow(user_data)
@@ -814,7 +828,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         booking.cancellation_reason = text
-        cancellation = cancellation_text_for_recipient(booking, user.id, cancellation_reason=text)
+        cancellation = cancellation_text_for_recipient(booking, user.id, cancellation_reason=text, manager_tag=manager_tag)
         clear_booking_flow(user_data)
         await update.effective_message.reply_text(cancellation, reply_markup=main_menu_keyboard())
 
@@ -823,6 +837,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             booking,
             exclude_user_id=user.id if user.id in SETTINGS.manager_ids else None,
             cancellation_reason=text,
+            manager_tag=manager_tag,
         )
         return
 
@@ -943,13 +958,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         if mode == "manager_remove_day":
-            success, reason, count = DB.remove_day(iso_date)
-            if success:
+            success, reason, count, booked_count = DB.remove_day(iso_date)
+            if success and reason == "removed_all":
                 await query.edit_message_text(
                     f"{texts.MANAGER_REMOVE_DAY_DONE}\n\nالتاريخ: {format_date_slash(iso_date)}\nعدد الساعات المحذوفة: {count}"
                 )
-            elif reason == "booked":
-                await query.edit_message_text(texts.MANAGER_REMOVE_DAY_BLOCKED)
+            elif success and reason == "partial":
+                await query.edit_message_text(
+                    f"{texts.MANAGER_REMOVE_DAY_PARTIAL_DONE}\n\nالتاريخ: {format_date_slash(iso_date)}\n"
+                    f"عدد الساعات المحذوفة: {count}\nالحجوزات المؤكدة المتبقية: {booked_count}"
+                )
+            elif success and reason == "booked_only":
+                await query.edit_message_text(
+                    f"{texts.MANAGER_REMOVE_DAY_BOOKED_ONLY}\n\nالتاريخ: {format_date_slash(iso_date)}\n"
+                    f"الحجوزات المؤكدة المتبقية: {booked_count}"
+                )
             else:
                 await query.edit_message_text(texts.GENERIC_ERROR)
             return
@@ -1089,12 +1112,12 @@ async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
                 booking.session_type,
                 viewer_tz,
                 viewer_label,
-                booking_tag=None if cancel_mode else booking_tag_for(booking),
+                booking_tag=None,
             )
         )
         lines.append("")
         if cancel_mode:
-            button_items.append((booking.id, booking_selector_label(booking, viewer_tz)))
+            button_items.append((booking.id, booking_selector_label(booking, viewer_tz, "إلغاء")))
 
     reply_markup = bookings_list_keyboard(button_items) if cancel_mode else None
     await update.effective_message.reply_text("\n".join(lines).strip(), reply_markup=reply_markup)
@@ -1136,16 +1159,18 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
+    tag = manager_booking_tag(booking)
+
     success, _ = DB.cancel_booking(booking_id)
     if not success:
         await query.edit_message_text(texts.BOOKING_CANCEL_NOT_FOUND)
         return
 
-    manager_text = cancellation_text_for_recipient(booking, query.from_user.id)
+    manager_text = cancellation_text_for_recipient(booking, query.from_user.id, manager_tag=tag)
     await query.edit_message_text(manager_text)
 
     try:
-        client_text = cancellation_text_for_recipient(booking, booking.client_user_id)
+        client_text = cancellation_text_for_recipient(booking, booking.client_user_id, manager_tag=tag)
         await context.bot.send_message(chat_id=booking.client_chat_id, text=client_text)
     except Exception:
         logger.exception("Failed to notify client about manager cancellation")
@@ -1154,6 +1179,7 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
         context,
         booking,
         exclude_user_id=query.from_user.id,
+        manager_tag=tag,
     )
 
 
@@ -1205,9 +1231,30 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
             await query.edit_message_text(texts.PANEL_NO_BOOKINGS_TO_CANCEL)
             return
 
+        viewer_tz, viewer_label = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
+        lines = [texts.MANAGER_REMOVE_BOOKING_TITLE, ""]
+        button_items: list[tuple[int, str]] = []
+
+        for booking in bookings:
+            lines.append(
+                format_booking_details(
+                    booking.slot_date,
+                    booking.start_time,
+                    booking.end_time,
+                    booking.client_name,
+                    booking.client_telegram,
+                    booking.session_type,
+                    viewer_tz,
+                    viewer_label,
+                    booking_tag=manager_booking_tag(booking),
+                )
+            )
+            lines.append("")
+            button_items.append((booking.id, booking_selector_label(booking, viewer_tz, "حذف")))
+
         await query.edit_message_text(
-            texts.MANAGER_REMOVE_BOOKING_TITLE,
-            reply_markup=manager_bookings_remove_keyboard([b.id for b in bookings]),
+            "\n".join(lines).strip(),
+            reply_markup=manager_bookings_remove_keyboard(button_items),
         )
         return
 
@@ -1236,7 +1283,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
                     booking.session_type,
                     viewer_tz,
                     viewer_label,
-                    booking_tag=booking_tag_for(booking),
+                    booking_tag=manager_booking_tag(booking),
                 )
                 for booking in grouped[group_date]
             ]
