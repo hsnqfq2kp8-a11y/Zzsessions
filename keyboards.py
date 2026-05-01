@@ -68,10 +68,10 @@ def bookings_list_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(rows)
 
 
-def manager_bookings_remove_keyboard(booking_ids: list[int]) -> InlineKeyboardMarkup:
+def manager_bookings_remove_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(f"حذف الحجز #{booking_id}", callback_data=f"manager_cancel_booking:{booking_id}")]
-        for booking_id in booking_ids
+        [InlineKeyboardButton(label, callback_data=f"manager_cancel_booking:{booking_id}")]
+        for booking_id, label in items
     ]
     rows.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
     return InlineKeyboardMarkup(rows)
