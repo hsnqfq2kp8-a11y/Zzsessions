@@ -83,6 +83,7 @@ def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int, i
         [InlineKeyboardButton(label, callback_data=f"slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
+    rows.append([InlineKeyboardButton("تغيير البلد", callback_data=f"country_open:{iso_date}")])
     rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{year}:{month}")])
     return InlineKeyboardMarkup(rows)
 
