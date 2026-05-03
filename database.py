@@ -118,9 +118,6 @@ class Database:
         if row is None:
             conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
 
-    # -----------------------------
-    # settings
-    # -----------------------------
     def is_booking_open(self) -> bool:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = 'booking_open'").fetchone()
@@ -138,9 +135,6 @@ class Database:
             )
             conn.commit()
 
-    # -----------------------------
-    # profiles
-    # -----------------------------
     def set_user_profile(self, user_id: int, country_name: str, timezone_name: str) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -164,9 +158,6 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    # -----------------------------
-    # availability alerts
-    # -----------------------------
     def set_availability_alert(self, user_id: int, chat_id: int, enabled: bool) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -243,9 +234,6 @@ class Database:
             )
             conn.commit()
 
-    # -----------------------------
-    # helpers
-    # -----------------------------
     def _slot_start_dt(self, slot_date: str, start_time: str) -> datetime:
         return datetime.combine(date.fromisoformat(slot_date), time.fromisoformat(start_time))
 
@@ -269,14 +257,13 @@ class Database:
 
     def _admin_day_for_slot(self, slot_date: str, start_time: str) -> str:
         """
-        اليوم الإداري:
-        من 00:00 إلى 03:59 يُحسب تابعاً لليوم السابق.
+        في منطق هذا البوت:
+        الأوقات بعد منتصف الليل وحتى 4 الفجر
+        تُعرض وتُنظَّم تحت نفس اليوم المختار أصلًا،
+        لذلك الهاشتاق يجب أن يبقى على نفس slot_date
+        ويكمل العدّ بدل أن يبدأ من جديد.
         """
-        hour = int(start_time.split(":")[0])
-        base_date = date.fromisoformat(slot_date)
-        if hour < 4:
-            base_date = base_date - timedelta(days=1)
-        return base_date.isoformat()
+        return slot_date
 
     def _row_to_slot(self, row: sqlite3.Row) -> Slot:
         return Slot(
@@ -305,9 +292,6 @@ class Database:
             cancellation_reason=row["cancellation_reason"],
         )
 
-    # -----------------------------
-    # slots
-    # -----------------------------
     def upsert_slot(self, slot_date: str, start_time: str, end_time: str, created_by: int) -> str:
         with self.connect() as conn:
             row = conn.execute(
@@ -579,9 +563,6 @@ class Database:
 
         return results
 
-    # -----------------------------
-    # bookings
-    # -----------------------------
     def create_booking(
         self,
         slot_id: int,
@@ -801,20 +782,7 @@ class Database:
             )
             conn.commit()
 
-    # -----------------------------
-    # FIXED: admin hashtag sequence
-    # -----------------------------
     def get_confirmed_day_time_sequence(self, booking_id: int) -> int | None:
-        """
-        يرجّع ترتيب الهاشتاق الإداري للحجز.
-
-        المنطق الصحيح:
-        - الهاشتاق للادمن يكون حسب ترتيب الوقت داخل "اليوم الإداري".
-        - اليوم الإداري يحسب من 04:00 فجراً إلى 03:59 فجراً.
-        - أي وقت من 00:00 إلى 03:59 يُعتبر تابعاً لليوم السابق.
-        - بالتالي 12 صباحاً، 1 صباحاً، 2 صباحاً، 3 صباحاً
-          لا يبدأ العد من #1، بل يكمل بعد مواعيد المساء لنفس اليوم الإداري.
-        """
         target = self.get_booking(booking_id)
         if not target or target.status != "confirmed":
             return None
@@ -847,7 +815,6 @@ class Database:
         same_admin_day.sort(
             key=lambda item: (
                 self._display_sort_value(item[2]),
-                item[1],
                 item[0],
             )
         )
