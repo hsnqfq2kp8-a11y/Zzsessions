@@ -29,6 +29,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton("عرض المواعيد المتاحة")],
             [KeyboardButton("مواعيدي")],
             [KeyboardButton("إلغاء حجز")],
+            [KeyboardButton("اشعارات المواعيد الجديدة")],
             [KeyboardButton("تواصل مع المنسقات")],
         ],
         resize_keyboard=True,
@@ -83,6 +84,7 @@ def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int, i
         for slot_id, label in slot_buttons
     ]
     rows.append([InlineKeyboardButton("تغيير البلد", callback_data=f"country_open:{iso_date}")])
+    rows.append([InlineKeyboardButton("اعلمني عند توفر مواعيد جديدة", callback_data=f"notify:open:{year}:{month}")])
     rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{year}:{month}")])
     return InlineKeyboardMarkup(rows)
 
@@ -120,24 +122,19 @@ def country_keyboard(items: list[tuple[str, str]], pending_date: str | None = No
     return InlineKeyboardMarkup(rows)
 
 
-def offers_sections_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("الجلسات النفسية", callback_data="offers:psychological")],
-            [InlineKeyboardButton("الإختبارات السلوكية", callback_data="offers:behavioral_tests")],
-            [InlineKeyboardButton("الدورات التعليمية", callback_data="offers:courses")],
-            [InlineKeyboardButton("حصص الكوتشينق", callback_data="offers:coaching")],
-            [InlineKeyboardButton("الرئيسية", callback_data="go:home")],
-        ]
-    )
+def notification_settings_keyboard(is_enabled: bool, source_token: str, back_callback_data: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("تفعيل الاشعارات", callback_data=f"notify:set:on:{source_token}")],
+        [InlineKeyboardButton("إيقاف الاشعارات", callback_data=f"notify:set:off:{source_token}")],
+        [InlineKeyboardButton("عرض المواعيد المتاحة", callback_data="notify:view")],
+        [InlineKeyboardButton("العودة", callback_data=back_callback_data)],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
-def offers_back_keyboard() -> InlineKeyboardMarkup:
+def schedule_notification_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("العودة إلى أقسام العروض", callback_data="offers:menu")],
-            [InlineKeyboardButton("الرئيسية", callback_data="go:home")],
-        ]
+        [[InlineKeyboardButton("عرض المواعيد المتاحة", callback_data="notify:view")]]
     )
 
 
@@ -188,6 +185,9 @@ def calendar_keyboard(
             else:
                 row.append(InlineKeyboardButton("-", callback_data="noop"))
         keyboard.append(row)
+
+    if mode == "client":
+        keyboard.append([InlineKeyboardButton("اعلمني عند توفر مواعيد جديدة", callback_data=f"notify:open:{year}:{month}")])
 
     keyboard.append([InlineKeyboardButton("الرئيسية", callback_data="go:home")])
     return InlineKeyboardMarkup(keyboard)
