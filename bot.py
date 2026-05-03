@@ -292,12 +292,12 @@ def sort_bookings_for_display(bookings: list[Booking]) -> list[Booking]:
     return sorted(bookings, key=lambda booking: (booking.slot_date, display_sort_value(booking.start_time), booking.id))
 
 
-def format_time_arabic(dt: datetime) -> str:
+def format_time_arabic(dt: datetime, include_after_midnight: bool = True) -> str:
     hour24 = dt.hour
     minute = dt.minute
     period = "صباحا" if hour24 < 12 else "مساءا"
     hour12 = hour24 % 12 or 12
-    suffix = " بعد منتصف الليل" if hour24 < 4 else ""
+    suffix = " بعد منتصف الليل" if include_after_midnight and hour24 < 4 else ""
     if minute == 0:
         return f"{hour12} {period}{suffix}"
     return f"{hour12}:{minute:02d} {period}{suffix}"
@@ -340,7 +340,7 @@ def format_session_block(slot_date: str, start_time: str, end_time: str, viewer_
     local_start = start_dt.astimezone(viewer_tz)
     lines = [
         f"اليوم : {arabic_day_name(local_start.date())} {local_start.year}/{local_start.month}/{local_start.day}",
-        f"الساعة : {format_time_arabic(local_start)} بتوقيت {viewer_label}",
+        f"الساعة : {format_time_arabic(local_start, include_after_midnight=True)} بتوقيت {viewer_label}",
     ]
     return "\n".join(lines)
 
@@ -373,7 +373,7 @@ def format_booking_details(
 def booking_selector_label(booking: Booking, viewer_tz: ZoneInfo, action_word: str) -> str:
     start_dt, _ = get_slot_datetimes(booking.slot_date, booking.start_time, booking.end_time)
     local_start = start_dt.astimezone(viewer_tz)
-    return f"{action_word} {arabic_day_name(local_start.date())} {local_start.month}/{local_start.day} - {format_time_arabic(local_start)}"
+    return f"{action_word} {arabic_day_name(local_start.date())} {local_start.month}/{local_start.day} - {format_time_arabic(local_start, include_after_midnight=True)}"
 
 
 def booking_summary_text(draft: dict, viewer_tz: ZoneInfo, viewer_label: str) -> str:
@@ -476,8 +476,11 @@ def reminder_text_for_recipient(
 
 
 def notification_status_text(is_enabled: bool) -> str:
-    status = texts.NOTIFY_STATUS_ENABLED if is_enabled else texts.NOTIFY_STATUS_DISABLED
-    return f"{texts.NOTIFY_MENU_HEADER}\n\nحالة الاشعارات: {status}\n\n{texts.NOTIFY_MENU_BODY}"
+    status = "مفعل ✅" if is_enabled else "غير مفعل"
+    return (
+        f"اشعارات المواعيد الجديدة : {status}\n"
+        "عند تفعيل الاشعارات ستصلك رسائل عند اضافة مواعيد جديدة في الجدول."
+    )
 
 
 def notification_dates_text(dates: list[str]) -> str:
@@ -653,7 +656,7 @@ async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
     for slot in slots:
         start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
         local_start = start_dt.astimezone(viewer_tz)
-        button_data.append((slot.id, format_time_arabic(local_start)))
+        button_data.append((slot.id, format_time_arabic(local_start, include_after_midnight=False)))
 
     await query.edit_message_text(
         f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(iso_date)}",
@@ -749,7 +752,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             for slot in slots:
                 start_dt, _ = get_slot_datetimes(slot.slot_date, slot.start_time, slot.end_time)
                 local_start = start_dt.astimezone(viewer_tz)
-                button_data.append((slot.id, format_time_arabic(local_start)))
+                button_data.append((slot.id, format_time_arabic(local_start, include_after_midnight=False)))
 
             await update.effective_message.reply_text(
                 f"{texts.CHOOSE_SLOT}\n\nالتاريخ المختار: {format_date_slash(pending_date)}",
@@ -916,9 +919,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _, _, state_value, source_token = data.split(":", 3)
         enabled = state_value == "on"
         DB.set_availability_alert(query.from_user.id, query.message.chat_id, enabled)
-        text_value = texts.NOTIFY_ENABLED if enabled else texts.NOTIFY_DISABLED
-        await query.edit_message_text(
-            f"{text_value}\n\n{notification_status_text(enabled)}",
+
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.exception("Failed to delete old notification settings message")
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=texts.NOTIFY_ENABLED if enabled else texts.NOTIFY_DISABLED,
+        )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=notification_status_text(enabled),
             reply_markup=notification_settings_keyboard(enabled, source_token, notification_back(source_token)),
         )
         return
@@ -1340,7 +1353,7 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
             [
                 (
                     slot.id,
-                    format_time_arabic(datetime.combine(date.today(), time.fromisoformat(slot.start_time))),
+                    format_time_arabic(datetime.combine(date.today(), time.fromisoformat(slot.start_time)), include_after_midnight=False),
                 )
                 for slot in slots
             ]
