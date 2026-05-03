@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import html
 import logging
 import re
-import textwrap
 import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
@@ -24,7 +22,7 @@ from telegram.ext import (
 )
 
 from config import Settings, load_settings
-from database import Booking, Database
+from database import Booking, Database, Slot
 from keyboards import (
     booking_summary_keyboard,
     bookings_list_keyboard,
@@ -33,9 +31,9 @@ from keyboards import (
     main_menu_keyboard,
     manager_bookings_remove_keyboard,
     manager_slots_remove_keyboard,
-    offers_back_keyboard,
-    offers_sections_keyboard,
+    notification_settings_keyboard,
     panel_keyboard,
+    schedule_notification_keyboard,
     slots_keyboard,
 )
 import texts
@@ -48,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 SETTINGS: Settings = load_settings()
 DB = Database(SETTINGS.db_path)
+SCHEDULE_ALERT_DELAY_MINUTES = 10
 
 HOUR_ONLY_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{1,2}))?\s*$")
 ARABIC_TO_ENGLISH_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
@@ -277,14 +276,31 @@ def arabic_day_name(d: date) -> str:
     return ARABIC_DAY_NAMES[d.weekday()]
 
 
+def display_sort_value(hhmm: str) -> tuple[int, int]:
+    hh, mm = hhmm.split(":")
+    hour = int(hh)
+    minute = int(mm)
+    rank_hour = hour + 24 if hour < 4 else hour
+    return rank_hour, minute
+
+
+def sort_slots_for_display(slots: list[Slot]) -> list[Slot]:
+    return sorted(slots, key=lambda slot: (display_sort_value(slot.start_time), slot.id))
+
+
+def sort_bookings_for_display(bookings: list[Booking]) -> list[Booking]:
+    return sorted(bookings, key=lambda booking: (booking.slot_date, display_sort_value(booking.start_time), booking.id))
+
+
 def format_time_arabic(dt: datetime) -> str:
     hour24 = dt.hour
     minute = dt.minute
     period = "صباحا" if hour24 < 12 else "مساءا"
     hour12 = hour24 % 12 or 12
+    suffix = " بعد منتصف الليل" if hour24 < 4 else ""
     if minute == 0:
-        return f"{hour12} {period}"
-    return f"{hour12}:{minute:02d} {period}"
+        return f"{hour12} {period}{suffix}"
+    return f"{hour12}:{minute:02d} {period}{suffix}"
 
 
 def get_user_timezone_and_label(user_id: int | None) -> tuple[ZoneInfo, str]:
@@ -459,6 +475,36 @@ def reminder_text_for_recipient(
     return reminder_text(booking, title, viewer_tz, viewer_label, booking_tag=tag)
 
 
+def notification_status_text(is_enabled: bool) -> str:
+    status = texts.NOTIFY_STATUS_ENABLED if is_enabled else texts.NOTIFY_STATUS_DISABLED
+    return f"{texts.NOTIFY_MENU_HEADER}\n\nحالة الاشعارات: {status}\n\n{texts.NOTIFY_MENU_BODY}"
+
+
+def notification_dates_text(dates: list[str]) -> str:
+    lines = [texts.NOTIFY_ALERT_TITLE, ""]
+    for slot_date in dates:
+        day = date.fromisoformat(slot_date)
+        lines.append(f"- {arabic_day_name(day)} {day.year}/{day.month}/{day.day}")
+    return "\n".join(lines)
+
+
+def notification_back(source_token: str) -> str:
+    if source_token.startswith("cal-"):
+        _, year, month = source_token.split("-")
+        return f"calendar:client:{year}:{month}"
+    return "go:home"
+
+
+async def show_notification_menu(target, user_id: int, source_token: str = "home") -> None:
+    is_enabled = DB.get_availability_alert_enabled(user_id)
+    text_value = notification_status_text(is_enabled)
+    markup = notification_settings_keyboard(is_enabled, source_token, notification_back(source_token))
+    if isinstance(target, CallbackQuery):
+        await target.edit_message_text(text_value, reply_markup=markup)
+    else:
+        await target.reply_text(text_value, reply_markup=markup)
+
+
 async def notify_managers_booking(
     context: ContextTypes.DEFAULT_TYPE,
     booking: Booking,
@@ -512,53 +558,27 @@ async def notify_managers_reminder(
             logger.exception("Failed to send reminder to manager %s", manager_id)
 
 
-def format_offer_item(name: str, price: str) -> str:
-    wrapped_lines = textwrap.wrap(
-        name,
-        width=34,
-        break_long_words=False,
-        break_on_hyphens=False,
-    )
-    if not wrapped_lines:
-        wrapped_lines = [name]
-
-    escaped_lines = [html.escape(line) for line in wrapped_lines]
-    first_line = f"• {escaped_lines[0]}"
-    other_lines = escaped_lines[1:]
-
-    body_lines = [first_line] + other_lines
-    body = "\n".join(body_lines)
-
-    return f"{body}\n<b>السعر:</b> {html.escape(price)}"
-
-
-def format_offer_section_message(section_key: str) -> str:
-    title, items = texts.OFFERS_SECTIONS[section_key]
-    blocks = [f"<b>{html.escape(title)} :</b>"]
-
-    for name, price in items:
-        blocks.append(format_offer_item(name, price))
-
-    return "\n\n".join(blocks)
-
-
-async def send_offers_menu_message(message) -> None:
-    await message.reply_text(
-        texts.OFFERS_MENU_TITLE,
-        reply_markup=offers_sections_keyboard(),
-    )
-
-
-async def show_offer_section(query: CallbackQuery, section_key: str) -> None:
-    if section_key not in texts.OFFERS_SECTIONS:
-        await query.edit_message_text(texts.GENERIC_ERROR)
+async def send_schedule_availability_alerts(app: Application) -> None:
+    marker, changed_dates = DB.get_due_schedule_alert_batch(SCHEDULE_ALERT_DELAY_MINUTES)
+    if not marker:
         return
 
-    await query.edit_message_text(
-        format_offer_section_message(section_key),
-        parse_mode=ParseMode.HTML,
-        reply_markup=offers_back_keyboard(),
-    )
+    now = now_local()
+    available_dates = DB.get_dates_with_available_slots(changed_dates, now.date().isoformat(), now.strftime("%H:%M"))
+    if available_dates:
+        text_value = notification_dates_text(available_dates)
+        markup = schedule_notification_keyboard()
+        for subscriber in DB.get_enabled_alert_subscribers():
+            try:
+                await app.bot.send_message(
+                    chat_id=subscriber["chat_id"],
+                    text=text_value,
+                    reply_markup=markup,
+                )
+            except Exception:
+                logger.exception("Failed to send schedule availability alert to %s", subscriber["chat_id"])
+
+    DB.mark_schedule_alert_batch_processed(marker)
 
 
 async def send_main_menu(message, text: str | None = None) -> None:
@@ -621,7 +641,7 @@ async def show_manager_calendar_message(query: CallbackQuery, mode: str, year: i
 
 async def show_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
     now = now_local()
-    slots = DB.get_available_slots(iso_date, now.date().isoformat(), now.strftime("%H:%M"))
+    slots = sort_slots_for_display(DB.get_available_slots(iso_date, now.date().isoformat(), now.strftime("%H:%M")))
     if not slots:
         await query.edit_message_text(texts.NO_SLOTS)
         return
@@ -717,7 +737,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if pending_date:
             now = now_local()
-            slots = DB.get_available_slots(pending_date, now.date().isoformat(), now.strftime("%H:%M"))
+            slots = sort_slots_for_display(DB.get_available_slots(pending_date, now.date().isoformat(), now.strftime("%H:%M")))
             if not slots:
                 await update.effective_message.reply_text(texts.NO_SLOTS)
                 await send_main_menu(update.effective_message)
@@ -814,7 +834,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = update.effective_user
         booking = DB.get_booking(booking_id) if booking_id else None
 
-        if not booking or booking.client_user_id != user.id or booking.status != "confirmed":
+        if not booking or not user or booking.client_user_id != user.id or booking.status != "confirmed":
             clear_booking_flow(user_data)
             await update.effective_message.reply_text(texts.BOOKING_CANCEL_NOT_FOUND, reply_markup=main_menu_keyboard())
             return
@@ -848,8 +868,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_client_calendar_message(update.effective_message)
         return
 
-    if text == "العروض":
-        await send_offers_menu_message(update.effective_message)
+    if text == "اشعارات المواعيد الجديدة":
+        await show_notification_menu(update.effective_message, update.effective_user.id if update.effective_user else 0, "home")
         return
 
     if text == "مواعيدي":
@@ -883,16 +903,24 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(texts.WELCOME_TEXT, reply_markup=main_menu_keyboard())
         return
 
-    if data == "offers:menu":
-        await query.edit_message_text(
-            texts.OFFERS_MENU_TITLE,
-            reply_markup=offers_sections_keyboard(),
-        )
+    if data == "notify:view":
+        await show_client_calendar_message(query)
         return
 
-    if data.startswith("offers:"):
-        section_key = data.split(":", 1)[1]
-        await show_offer_section(query, section_key)
+    if data.startswith("notify:open:"):
+        _, _, year, month = data.split(":")
+        await show_notification_menu(query, query.from_user.id, f"cal-{year}-{month}")
+        return
+
+    if data.startswith("notify:set:"):
+        _, _, state_value, source_token = data.split(":", 3)
+        enabled = state_value == "on"
+        DB.set_availability_alert(query.from_user.id, query.message.chat_id, enabled)
+        text_value = texts.NOTIFY_ENABLED if enabled else texts.NOTIFY_DISABLED
+        await query.edit_message_text(
+            f"{text_value}\n\n{notification_status_text(enabled)}",
+            reply_markup=notification_settings_keyboard(enabled, source_token, notification_back(source_token)),
+        )
         return
 
     if data.startswith("country_open:"):
@@ -1090,7 +1118,7 @@ async def finalize_booking(query: CallbackQuery, context: ContextTypes.DEFAULT_T
 async def show_user_bookings(update: Update, cancel_mode: bool = False) -> None:
     user = update.effective_user
     now = now_local()
-    bookings = DB.get_user_upcoming_bookings(user.id, now.date().isoformat(), now.strftime("%H:%M"))
+    bookings = sort_bookings_for_display(DB.get_user_upcoming_bookings(user.id, now.date().isoformat(), now.strftime("%H:%M")))
 
     if not bookings:
         await update.effective_message.reply_text(texts.NO_USER_BOOKINGS, reply_markup=main_menu_keyboard())
@@ -1192,16 +1220,13 @@ def section_title_for_bookings(group_date: date, today_date: date) -> str:
 def split_booking_sections(blocks: list[str], heading: str, limit: int = 3500) -> list[str]:
     sections: list[str] = []
     current = heading
-    first = True
     for block in blocks:
-        candidate = (current + "\n\n" + block) if current else block
-        if len(candidate) > limit and current and current != heading:
+        candidate = current + "\n\n" + block if current else block
+        if len(candidate) > limit and current != heading:
             sections.append(current)
-            current = heading + "\n\n" + block if first else block
-            first = False
+            current = heading + "\n\n" + block
         else:
             current = candidate
-            first = False
     if current:
         sections.append(current)
     return sections
@@ -1226,7 +1251,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
 
     if action == "remove_booking":
         now = now_local()
-        bookings = DB.get_all_upcoming_bookings(now.date().isoformat(), now.strftime("%H:%M"))
+        bookings = sort_bookings_for_display(DB.get_all_upcoming_bookings(now.date().isoformat(), now.strftime("%H:%M")))
         if not bookings:
             await query.edit_message_text(texts.PANEL_NO_BOOKINGS_TO_CANCEL)
             return
@@ -1260,7 +1285,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
 
     if action == "bookings":
         now = now_local()
-        bookings = DB.get_all_upcoming_bookings(now.date().isoformat(), now.strftime("%H:%M"))
+        bookings = sort_bookings_for_display(DB.get_all_upcoming_bookings(now.date().isoformat(), now.strftime("%H:%M")))
         if not bookings:
             await query.edit_message_text(texts.PANEL_NO_BOOKINGS)
             return
@@ -1272,6 +1297,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
 
         sections_text: list[str] = []
         for group_date in sorted(grouped.keys()):
+            day_bookings = sorted(grouped[group_date], key=lambda b: (display_sort_value(b.start_time), b.id))
             heading = section_title_for_bookings(group_date, now.date())
             blocks = [
                 format_booking_details(
@@ -1285,7 +1311,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
                     viewer_label,
                     booking_tag=manager_booking_tag(booking),
                 )
-                for booking in grouped[group_date]
+                for booking in day_bookings
             ]
             sections_text.extend(split_booking_sections(blocks, heading))
 
@@ -1303,7 +1329,7 @@ async def handle_panel_action(query: CallbackQuery, context: ContextTypes.DEFAUL
 
 
 async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None:
-    slots = DB.get_all_slots_for_date(iso_date)
+    slots = sort_slots_for_display(DB.get_all_slots_for_date(iso_date))
     if not slots:
         await query.edit_message_text(texts.MANAGER_NO_SLOTS_THIS_DAY)
         return
@@ -1364,6 +1390,8 @@ async def reminder_loop(app: Application) -> None:
                 kind = item["kind"]
                 await send_reminder(app, booking, kind)
                 DB.mark_notification_sent(booking.id, kind)
+
+            await send_schedule_availability_alerts(app)
         except Exception:
             logger.exception("Reminder loop error")
         await asyncio.sleep(SETTINGS.check_interval_seconds)
