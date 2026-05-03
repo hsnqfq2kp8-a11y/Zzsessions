@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,23 @@ class Database:
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError(f"Time out of range: {value}")
         return f"{hour:02d}:{minute:02d}"
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _set_setting(self, key: str, value: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO settings(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
+        )
+
+    def _get_setting(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
 
     def _slot_start_dt(self, slot_date: str, start_time: str) -> datetime:
         return datetime.combine(
@@ -149,15 +166,25 @@ class Database:
                     FOREIGN KEY(slot_id) REFERENCES slots(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS availability_alert_subscriptions (
+                    user_id INTEGER PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS pending_schedule_alert_dates (
+                    slot_date TEXT PRIMARY KEY
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_slots_date_active ON slots(slot_date, is_active);
                 CREATE INDEX IF NOT EXISTS idx_bookings_slot_status ON bookings(slot_id, status);
                 CREATE INDEX IF NOT EXISTS idx_bookings_user_status ON bookings(client_user_id, status);
                 """
             )
 
-            cur = self.conn.execute("SELECT value FROM settings WHERE key='booking_open'")
-            if cur.fetchone() is None:
-                self.conn.execute("INSERT INTO settings(key, value) VALUES('booking_open', '1')")
+            if self._get_setting("booking_open") is None:
+                self._set_setting("booking_open", "1")
 
             self._migrate_slots()
             self._migrate_bookings()
@@ -233,15 +260,11 @@ class Database:
         for row in rows:
             admin_day = row["admin_day"] or self._admin_day_for_slot(row["slot_date"], row["start_time"])
             existing_seq = row["daily_sequence"]
-
             if existing_seq is None:
-                next_seq = current_max_by_day.get(admin_day, 0) + 1
-                daily_sequence = next_seq
+                daily_sequence = current_max_by_day.get(admin_day, 0) + 1
             else:
                 daily_sequence = int(existing_seq)
-
             current_max_by_day[admin_day] = max(current_max_by_day.get(admin_day, 0), daily_sequence)
-
             self.conn.execute(
                 "UPDATE bookings SET admin_day=?, daily_sequence=? WHERE id=?",
                 (admin_day, daily_sequence, row["id"]),
@@ -271,15 +294,86 @@ class Database:
 
     def set_booking_open(self, is_open: bool) -> None:
         with self._lock, self.conn:
-            self.conn.execute(
-                "UPDATE settings SET value=? WHERE key='booking_open'",
-                ("1" if is_open else "0",),
-            )
+            self._set_setting("booking_open", "1" if is_open else "0")
 
     def is_booking_open(self) -> bool:
         with self._lock:
-            row = self.conn.execute("SELECT value FROM settings WHERE key='booking_open'").fetchone()
-            return (row["value"] if row else "1") == "1"
+            return (self._get_setting("booking_open") or "1") == "1"
+
+    def set_availability_alert(self, user_id: int, chat_id: int, enabled: bool) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO availability_alert_subscriptions(user_id, chat_id, is_enabled, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    chat_id=excluded.chat_id,
+                    is_enabled=excluded.is_enabled,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, chat_id, 1 if enabled else 0),
+            )
+
+    def get_availability_alert_enabled(self, user_id: int) -> bool:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT is_enabled FROM availability_alert_subscriptions WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            return bool(row and int(row["is_enabled"]) == 1)
+
+    def get_enabled_alert_subscribers(self) -> list[dict[str, int]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT user_id, chat_id FROM availability_alert_subscriptions WHERE is_enabled=1"
+            ).fetchall()
+            return [{"user_id": int(r["user_id"]), "chat_id": int(r["chat_id"])} for r in rows]
+
+    def record_schedule_change(self, slot_date: str) -> None:
+        normalized_date = self._normalize_date_str(slot_date)
+        with self._lock, self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO pending_schedule_alert_dates(slot_date) VALUES(?)",
+                (normalized_date,),
+            )
+            self._set_setting("schedule_alert_last_changed_at", self._utc_now_iso())
+
+    def get_due_schedule_alert_batch(self, delay_minutes: int) -> tuple[str | None, list[str]]:
+        now_utc = datetime.now(timezone.utc)
+        with self._lock:
+            marker = self._get_setting("schedule_alert_last_changed_at")
+            last_sent = self._get_setting("schedule_alert_last_sent_marker")
+            if not marker or marker == last_sent:
+                return None, []
+
+            try:
+                changed_at = datetime.fromisoformat(marker)
+            except ValueError:
+                return None, []
+
+            if changed_at.tzinfo is None:
+                changed_at = changed_at.replace(tzinfo=timezone.utc)
+
+            if now_utc < changed_at + timedelta(minutes=delay_minutes):
+                return None, []
+
+            rows = self.conn.execute(
+                "SELECT slot_date FROM pending_schedule_alert_dates ORDER BY slot_date"
+            ).fetchall()
+            return marker, [r["slot_date"] for r in rows]
+
+    def mark_schedule_alert_batch_processed(self, marker: str) -> None:
+        with self._lock, self.conn:
+            self._set_setting("schedule_alert_last_sent_marker", marker)
+            self.conn.execute("DELETE FROM pending_schedule_alert_dates")
+
+    def get_dates_with_available_slots(self, candidate_dates: list[str], now_date: str, now_time: str) -> list[str]:
+        unique_dates = sorted({self._normalize_date_str(d) for d in candidate_dates})
+        available: list[str] = []
+        for slot_date in unique_dates:
+            if self.get_available_slots(slot_date, now_date, now_time):
+                available.append(slot_date)
+        return available
 
     def upsert_slot(self, slot_date: str, start_time: str, end_time: str, created_by: int) -> str:
         normalized_date = self._normalize_date_str(slot_date)
@@ -300,6 +394,7 @@ class Database:
                     """,
                     (normalized_date, normalized_start, normalized_end, created_by),
                 )
+                self.record_schedule_change(normalized_date)
                 return "created"
 
             if existing["is_active"] == 0:
@@ -311,6 +406,7 @@ class Database:
                     """,
                     (normalized_end, created_by, existing["id"]),
                 )
+                self.record_schedule_change(normalized_date)
                 return "reactivated"
 
             return "exists"
@@ -438,6 +534,7 @@ class Database:
                 return False, "booked"
 
             self.conn.execute("UPDATE slots SET is_active=0 WHERE id=?", (slot_id,))
+            self.record_schedule_change(row["slot_date"])
             return True, "removed"
 
     def remove_day(self, slot_date: str) -> tuple[bool, str, int, int]:
@@ -479,6 +576,8 @@ class Database:
                 )
 
             deleted_count = cur.rowcount
+            if deleted_count > 0:
+                self.record_schedule_change(normalized_date)
 
             if booked_count > 0 and deleted_count > 0:
                 return True, "partial", deleted_count, booked_count
@@ -565,7 +664,6 @@ class Database:
             for index, row in enumerate(rows, start=1):
                 if int(row["id"]) == int(booking_id):
                     return index
-
             return None
 
     def get_booking(self, booking_id: int) -> Booking | None:
