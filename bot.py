@@ -806,7 +806,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.effective_message.reply_text(texts.GENERIC_ERROR)
             return
 
-        results = add_slots_from_text(slot_date, text, user.id)
+        admin_tz, admin_label = get_user_timezone_and_label(user.id)
+        results = add_slots_from_text(slot_date, text, user.id, admin_tz)
 
         if not results["valid"]:
             await update.effective_message.reply_text(
@@ -820,7 +821,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await update.effective_message.reply_text(
             f"{texts.MANAGER_ADD_DONE}\n\n"
-            f"تم تحديث جدول المواعيد مباشرة.\n"
+            f"تم اعتماد الإدخال حسب توقيت: {admin_label}\n"
             f"تمت الإضافة: {results['created']}\n"
             f"معاد تفعيلها: {results['reactivated']}\n"
             f"موجودة مسبقًا: {results['exists']}",
@@ -989,8 +990,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if mode == "manager_add":
             context.user_data["state"] = "manager_await_slots_input"
             context.user_data["manager_selected_date"] = iso_date
+            admin_tz, admin_label = get_user_timezone_and_label(query.from_user.id if query.from_user else None)
             await query.edit_message_text(
-                f"اليوم المختار: {format_date_slash(iso_date)}\n\n{texts.ASK_MANAGER_SLOTS}"
+                f"اليوم المختار: {format_date_slash(iso_date)}\n"
+                f"سيتم اعتماد الإدخال حسب توقيت: {admin_label}\n\n"
+                f"{texts.ASK_MANAGER_SLOTS}"
             )
             return
 
@@ -1359,7 +1363,25 @@ async def show_remove_slots_for_day(query: CallbackQuery, iso_date: str) -> None
     )
 
 
-def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
+def convert_admin_local_slot_to_system(slot_date_local: str, start_time_local: str, admin_tz: ZoneInfo) -> tuple[str, str, str]:
+    local_start = datetime.combine(
+        date.fromisoformat(slot_date_local),
+        time.fromisoformat(start_time_local),
+        tzinfo=admin_tz,
+    )
+    local_end = local_start + timedelta(hours=1)
+
+    system_start = local_start.astimezone(SETTINGS.timezone)
+    system_end = local_end.astimezone(SETTINGS.timezone)
+
+    system_slot_date = system_start.date().isoformat()
+    system_start_time = system_start.strftime("%H:%M")
+    system_end_time = system_end.strftime("%H:%M")
+
+    return system_slot_date, system_start_time, system_end_time
+
+
+def add_slots_from_text(slot_date: str, text: str, created_by: int, admin_tz: ZoneInfo) -> dict:
     normalized_text = normalize_digits(text)
     parts = [p.strip() for p in re.split(r"[\n,]+", normalized_text) if p.strip()]
     valid_count = 0
@@ -1369,13 +1391,15 @@ def add_slots_from_text(slot_date: str, text: str, created_by: int) -> dict:
 
     for part in parts:
         try:
-            start_norm = normalize_hour_input(part)
-            end_norm = add_one_hour(start_norm)
+            start_norm_local = normalize_hour_input(part)
+            system_slot_date, system_start, system_end = convert_admin_local_slot_to_system(
+                slot_date, start_norm_local, admin_tz
+            )
             valid_count += 1
         except ValueError:
             continue
 
-        result = DB.upsert_slot(slot_date, start_norm, end_norm, created_by)
+        result = DB.upsert_slot(system_slot_date, system_start, system_end, created_by)
         if result == "created":
             created += 1
         elif result == "reactivated":
