@@ -83,8 +83,6 @@ def slots_keyboard(slot_buttons: list[tuple[int, str]], year: int, month: int, i
         [InlineKeyboardButton(label, callback_data=f"slot:{slot_id}")]
         for slot_id, label in slot_buttons
     ]
-    rows.append([InlineKeyboardButton("تغيير البلد", callback_data=f"country_open:{iso_date}")])
-    rows.append([InlineKeyboardButton("اعلمني عند توفر مواعيد جديدة", callback_data=f"notify:open:{year}:{month}")])
     rows.append([InlineKeyboardButton("الرجوع لإختيار اليوم", callback_data=f"calendar:client:{year}:{month}")])
     return InlineKeyboardMarkup(rows)
 
@@ -123,13 +121,14 @@ def country_keyboard(items: list[tuple[str, str]], pending_date: str | None = No
 
 
 def notification_settings_keyboard(is_enabled: bool, source_token: str, back_callback_data: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("تفعيل الاشعارات", callback_data=f"notify:set:on:{source_token}")],
-        [InlineKeyboardButton("إيقاف الاشعارات", callback_data=f"notify:set:off:{source_token}")],
-        [InlineKeyboardButton("عرض المواعيد المتاحة", callback_data="notify:view")],
-        [InlineKeyboardButton("العودة", callback_data=back_callback_data)],
-    ]
-    return InlineKeyboardMarkup(rows)
+    toggle_text = "إيقاف الاشعارات" if is_enabled else "تفعيل الاشعارات"
+    toggle_state = "off" if is_enabled else "on"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(toggle_text, callback_data=f"notify:set:{toggle_state}:{source_token}")],
+            [InlineKeyboardButton("العودة", callback_data=back_callback_data)],
+        ]
+    )
 
 
 def schedule_notification_keyboard() -> InlineKeyboardMarkup:
