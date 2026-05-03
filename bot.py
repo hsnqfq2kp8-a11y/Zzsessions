@@ -1226,8 +1226,8 @@ async def manager_cancel_booking(query: CallbackQuery, context: ContextTypes.DEF
 
 def section_title_for_bookings(group_date: date, today_date: date) -> str:
     if group_date == today_date:
-        return "حجوزات اليوم :"
-    return f"حجوزات {arabic_day_name(group_date)} :"
+        return f"حجوزات اليوم {group_date.day}/{group_date.month}/{group_date.year} :"
+    return f"حجوزات {arabic_day_name(group_date)} {group_date.day}/{group_date.month}/{group_date.year} :"
 
 
 def split_booking_sections(blocks: list[str], heading: str, limit: int = 3500) -> list[str]:
